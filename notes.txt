@@ -1,0 +1,19 @@
+https://github.com/topics/obfuscation
+
+EXE: 
+
+.NET, Go, C++, ...
+
+.NET:
+https://github.com/NotPrab/.NET-Obfuscator
+https://github.com/obfuscar/obfuscar
+
+C/C++:
+https://github.com/DosX-dev/obfus.h
+https://github.com/adamyaxley/Obfuscate (C++ 14)
+https://github.com/ac3ss0r/obfusheader.h (C++ 14)
+
+
+
+Go:
+https://github.com/nickvourd/Supernova

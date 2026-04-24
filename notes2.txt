@@ -1,0 +1,37 @@
+Tìm hiểu kỹ thuật làm rối mã và ứng dụng trong phân tích mã độc Android/Windows sử dụng kỹ thuật này. Xây dựng công cụ phát hiện mã độc làm rối mã và phân tích về mã độc đó.
+
+
+Obfuscation technique and application in Windows malware analysis using this technique. Develop tools to detect obfuscated malware and analyze that one.
+
+Design for me what to do, where to start and a clear plan to complete this topic within 7 weeks. Make the description clearer, is this about 1 obfuscation technique or we have to do more than 2? Suggest 2 technique and develop a plan based on 2 techniques.
+
+Windows:
+- API Hashing/API Obfuscation
+- Payload & String Encryption (XOR/RC4)
+- Control Flow Obfuscation
+
+
+Research and Environment Setup
+- Basic Windows PE structure
+- Static vs dynamic analysis
+- Lab Setup
+
+Mastering the Obfuscation Techniques
+- API Hashing (MurmurHash or DJB2)/API Obfuscation
+- Payload & String Encryption (XOR/RC4)
+- Control Flow Obfuscation (Add junk instructions, Add fake branches, Flatten control flow)
+
+Building the Static Detection Tool: Python is highly effective for this. Utilize libraries like pefile and yara-python.
+
+Detection Logic: 
+
+For API Hashing: Write logic to scan the PE file and flag binaries with unusually small or completely missing IATs.
+
+For Encryption: Implement Shannon Entropy calculations across the PE sections. Highly encrypted payloads will cause the entropy of specific sections (like .data or .text) to spike near 8.0.
+
+
+Deliverable: A Python script capable of statically analyzing a directory of binaries and flagging your simulator based on entropy and import anomalies.
+
+Developing Dynamic Analysis Workflows: Memory Forensics, use WinDbg (!?) to attach to your running simulator. Practice setting breakpoints on memory allocation APIs (if you can find them) or inspecting heap allocations to catch the decrypted strings and unhashed APIs in plain text, or use frida or simple DLL injection.
+
+
