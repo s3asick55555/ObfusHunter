@@ -1,0 +1,715 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Deobfuscator - Binary Obfuscation Detector</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        :root {
+            --primary: #2c3e50;
+            --secondary: #e74c3c;
+            --success: #27ae60;
+            --warning: #f39c12;
+            --danger: #c0392b;
+            --info: #3498db;
+        }
+
+        body {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px 0;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        .navbar {
+            background: rgba(44, 62, 80, 0.95) !important;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.3);
+            border-bottom: 3px solid #e74c3c;
+        }
+
+        .navbar-brand {
+            font-weight: bold;
+            font-size: 1.5em;
+            color: #ecf0f1 !important;
+        }
+
+        .navbar-brand i {
+            color: #e74c3c;
+            margin-right: 8px;
+        }
+
+        .container-main {
+            max-width: 1200px;
+            margin-top: 40px;
+        }
+
+        .card {
+            border: none;
+            border-radius: 10px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+        }
+
+        .card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 12px 40px rgba(0,0,0,0.15);
+        }
+
+        .card-header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border-radius: 10px 10px 0 0 !important;
+            border: none;
+            padding: 20px;
+        }
+
+        .upload-area {
+            border: 3px dashed #667eea;
+            border-radius: 10px;
+            padding: 40px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            background: #f8f9ff;
+        }
+
+        .upload-area:hover {
+            border-color: #764ba2;
+            background: #f0f1ff;
+            transform: scale(1.02);
+        }
+
+        .upload-area.dragover {
+            border-color: #e74c3c;
+            background: #ffe5e5;
+        }
+
+        .upload-icon {
+            font-size: 3em;
+            color: #667eea;
+            margin-bottom: 15px;
+        }
+
+        .btn-upload {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border: none;
+            padding: 12px 30px;
+            font-weight: 600;
+            transition: all 0.3s ease;
+        }
+
+        .btn-upload:hover {
+            transform: scale(1.05);
+            box-shadow: 0 5px 20px rgba(102, 126, 234, 0.4);
+            color: white;
+        }
+
+        .results-container {
+            margin-top: 30px;
+            display: none;
+        }
+
+        .obfuscation-badge {
+            font-size: 1.2em;
+            padding: 15px 20px;
+            border-radius: 10px;
+            text-align: center;
+            margin-bottom: 20px;
+            font-weight: bold;
+        }
+
+        .obfuscation-score {
+            font-size: 2.5em;
+            font-weight: bold;
+            text-align: center;
+            margin: 20px 0;
+        }
+
+        .indicator-item {
+            padding: 12px;
+            margin-bottom: 10px;
+            border-left: 4px solid #667eea;
+            background: #f8f9ff;
+            border-radius: 5px;
+            transition: all 0.3s ease;
+        }
+
+        .indicator-item.HIGH {
+            border-left-color: #c0392b;
+            background: #ffe5e5;
+        }
+
+        .indicator-item.MEDIUM {
+            border-left-color: #f39c12;
+            background: #fff5e5;
+        }
+
+        .indicator-item.LOW {
+            border-left-color: #27ae60;
+            background: #e5ffe5;
+        }
+
+        .indicator-item:hover {
+            transform: translateX(5px);
+            box-shadow: 0 3px 10px rgba(0,0,0,0.1);
+        }
+
+        .severity-badge {
+            font-size: 0.75em;
+            padding: 5px 10px;
+            border-radius: 5px;
+            font-weight: bold;
+            margin-left: 10px;
+        }
+
+        .severity-badge.HIGH {
+            background: #c0392b;
+            color: white;
+        }
+
+        .severity-badge.MEDIUM {
+            background: #f39c12;
+            color: white;
+        }
+
+        .severity-badge.LOW {
+            background: #27ae60;
+            color: white;
+        }
+
+        .section-info {
+            padding: 10px;
+            margin: 8px 0;
+            background: white;
+            border-left: 4px solid #667eea;
+            border-radius: 5px;
+        }
+
+        .entropy-bar {
+            height: 8px;
+            background: #ecf0f1;
+            border-radius: 5px;
+            overflow: hidden;
+            margin-top: 5px;
+        }
+
+        .entropy-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #27ae60, #f39c12, #c0392b);
+            transition: width 0.5s ease;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            display: none;
+        }
+
+        .spinner-border {
+            color: #667eea;
+        }
+
+        .nav-tabs {
+            border-bottom: 2px solid #667eea;
+            margin-bottom: 20px;
+        }
+
+        .nav-tabs .nav-link {
+            color: #667eea;
+            font-weight: 600;
+            border: none;
+            border-bottom: 3px solid transparent;
+            transition: all 0.3s ease;
+        }
+
+        .nav-tabs .nav-link:hover {
+            border-bottom-color: #667eea;
+            color: #764ba2;
+        }
+
+        .nav-tabs .nav-link.active {
+            background: transparent;
+            color: #764ba2;
+            border-bottom-color: #764ba2;
+        }
+
+        .alert-custom {
+            border: none;
+            border-radius: 10px;
+            border-left: 4px solid;
+        }
+
+        .alert-danger {
+            background: #ffe5e5;
+            border-left-color: #c0392b;
+            color: #c0392b;
+        }
+
+        footer {
+            margin-top: 50px;
+            padding: 30px 0;
+            text-align: center;
+            color: white;
+        }
+
+        .feature-icon {
+            font-size: 2em;
+            margin-bottom: 10px;
+            color: #667eea;
+        }
+
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .results-container {
+            animation: fadeIn 0.5s ease;
+        }
+    </style>
+</head>
+<body>
+    <!-- Navigation -->
+    <nav class="navbar navbar-expand-lg navbar-dark">
+        <div class="container-fluid">
+            <a class="navbar-brand" href="/">
+                <i class="fas fa-shield-alt"></i>
+                Deobfuscator
+            </a>
+            <span class="navbar-text text-light">Binary Obfuscation Detection</span>
+        </div>
+    </nav>
+
+    <!-- Main Container -->
+    <div class="container container-main">
+        <!-- Upload Card -->
+        <div class="row">
+            <div class="col-lg-8 mx-auto">
+                <div class="card mb-4">
+                    <div class="card-header">
+                        <h4 class="mb-0">
+                            <i class="fas fa-cloud-upload-alt"></i>
+                            Upload Executable for Analysis
+                        </h4>
+                    </div>
+                    <div class="card-body p-5">
+                        <form id="uploadForm" enctype="multipart/form-data">
+                            <div class="upload-area" id="uploadArea">
+                                <div class="upload-icon">
+                                    <i class="fas fa-file-import"></i>
+                                </div>
+                                <h5>Drag & Drop Your Executable Here</h5>
+                                <p class="text-muted mb-3">or click to browse</p>
+                                <input type="file" id="fileInput" name="file" accept=".exe,.dll,.bin,.scr,.sys,.com" style="display: none;" required>
+                                <button type="button" class="btn btn-upload" id="browseBtn">
+                                    <i class="fas fa-folder-open"></i> Browse Files
+                                </button>
+                                <p class="text-muted mt-3 mb-0">
+                                    <small>Max size: 50MB | Supported: EXE, DLL, BIN, SCR, SYS, COM</small>
+                                </p>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+
+                <!-- Loading Spinner -->
+                <div class="loading" id="loadingSpinner">
+                    <div class="spinner-border" role="status">
+                        <span class="visually-hidden">Analyzing...</span>
+                    </div>
+                    <p class="mt-3 text-white"><strong>Analyzing file...</strong></p>
+                </div>
+
+                <!-- Error Alert -->
+                <div class="alert alert-danger alert-custom" id="errorAlert" style="display: none;" role="alert">
+                    <i class="fas fa-exclamation-circle"></i>
+                    <span id="errorMessage"></span>
+                </div>
+
+                <!-- Results Container -->
+                <div class="results-container" id="resultsContainer">
+                    <!-- Summary Card -->
+                    <div class="card mb-4">
+                        <div class="card-header">
+                            <h4 class="mb-0">
+                                <i class="fas fa-file-contract"></i>
+                                Analysis Summary
+                            </h4>
+                        </div>
+                        <div class="card-body">
+                            <div class="row">
+                                <div class="col-md-6">
+                                    <p><strong>Filename:</strong> <span id="resultFilename"></span></p>
+                                    <p><strong>File Size:</strong> <span id="resultSize"></span></p>
+                                </div>
+                                <div class="col-md-6">
+                                    <p><strong>Architecture:</strong> <span id="resultArch"></span></p>
+                                    <p><strong>Entry Point:</strong> <span id="resultEntryPoint"></span></p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Obfuscation Status -->
+                    <div class="card mb-4">
+                        <div class="card-header">
+                            <h4 class="mb-0">
+                                <i class="fas fa-exclamation-triangle"></i>
+                                Obfuscation Detection
+                            </h4>
+                        </div>
+                        <div class="card-body">
+                            <div id="obfuscationBadge" class="obfuscation-badge"></div>
+                            <div class="obfuscation-score">
+                                <span id="obfuscationScore">0</span>/100
+                            </div>
+                            <div class="progress mb-3" style="height: 25px;">
+                                <div id="scoreProgress" class="progress-bar bg-success" role="progressbar" style="width: 0%;" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></div>
+                            </div>
+                            <div id="indicatorsList"></div>
+                        </div>
+                    </div>
+
+                    <!-- Tabs for Details -->
+                    <div class="card">
+                        <div class="card-header">
+                            <h4 class="mb-0">
+                                <i class="fas fa-microscope"></i>
+                                Detailed Analysis
+                            </h4>
+                        </div>
+                        <div class="card-body">
+                            <ul class="nav nav-tabs" role="tablist">
+                                <li class="nav-item" role="presentation">
+                                    <button class="nav-link active" id="entropy-tab" data-bs-toggle="tab" data-bs-target="#entropy-pane" type="button" role="tab">
+                                        <i class="fas fa-chart-bar"></i> Entropy
+                                    </button>
+                                </li>
+                                <li class="nav-item" role="presentation">
+                                    <button class="nav-link" id="sections-tab" data-bs-toggle="tab" data-bs-target="#sections-pane" type="button" role="tab">
+                                        <i class="fas fa-layer-group"></i> Sections
+                                    </button>
+                                </li>
+                                <li class="nav-item" role="presentation">
+                                    <button class="nav-link" id="imports-tab" data-bs-toggle="tab" data-bs-target="#imports-pane" type="button" role="tab">
+                                        <i class="fas fa-link"></i> Imports
+                                    </button>
+                                </li>
+                                <li class="nav-item" role="presentation">
+                                    <button class="nav-link" id="xor-tab" data-bs-toggle="tab" data-bs-target="#xor-pane" type="button" role="tab">
+                                        <i class="fas fa-key"></i> XOR Detection
+                                    </button>
+                                </li>
+                            </ul>
+
+                            <div class="tab-content mt-3">
+                                <!-- Entropy Tab -->
+                                <div class="tab-pane fade show active" id="entropy-pane" role="tabpanel">
+                                    <h5>Overall Entropy</h5>
+                                    <div class="mb-3">
+                                        <div class="d-flex justify-content-between mb-2">
+                                            <span>File Entropy:</span>
+                                            <strong id="entropyValue">0.0000</strong>
+                                        </div>
+                                        <div class="entropy-bar">
+                                            <div class="entropy-fill" id="entropyBar" style="width: 0%;"></div>
+                                        </div>
+                                        <small class="text-muted">
+                                            0.0 = Highly Repetitive | 8.0 = Highly Random/Encrypted
+                                        </small>
+                                    </div>
+                                    <div class="alert alert-info mt-3">
+                                        <strong>Interpretation:</strong>
+                                        <div id="entropyInterpretation"></div>
+                                    </div>
+                                </div>
+
+                                <!-- Sections Tab -->
+                                <div class="tab-pane fade" id="sections-pane" role="tabpanel">
+                                    <h5>PE Sections</h5>
+                                    <div id="sectionsList"></div>
+                                </div>
+
+                                <!-- Imports Tab -->
+                                <div class="tab-pane fade" id="imports-pane" role="tabpanel">
+                                    <h5>Imported Functions</h5>
+                                    <div id="suspiciousImportsList" class="mb-3"></div>
+                                    <div id="allImportsList"></div>
+                                </div>
+
+                                <!-- XOR Tab -->
+                                <div class="tab-pane fade" id="xor-pane" role="tabpanel">
+                                    <h5>XOR Encoding Detection</h5>
+                                    <div id="xorList"></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Features Row -->
+        <div class="row mt-5 mb-5">
+            <div class="col-md-4 text-center text-white">
+                <div class="feature-icon">
+                    <i class="fas fa-lock"></i>
+                </div>
+                <h5>Entropy Analysis</h5>
+                <p>Detects encryption and packing through Shannon entropy calculation</p>
+            </div>
+            <div class="col-md-4 text-center text-white">
+                <div class="feature-icon">
+                    <i class="fas fa-exchange-alt"></i>
+                </div>
+                <h5>XOR Detection</h5>
+                <p>Identifies XOR-encoded strings and potential encryption keys</p>
+            </div>
+            <div class="col-md-4 text-center text-white">
+                <div class="feature-icon">
+                    <i class="fas fa-microscope"></i>
+                </div>
+                <h5>API Analysis</h5>
+                <p>Detects suspicious Windows API calls and code injection patterns</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Footer -->
+    <footer>
+        <div class="container">
+            <p>&copy; 2026 Deobfuscator - Binary Obfuscation Detection System</p>
+            <small>For Educational & Authorized Security Research Only</small>
+        </div>
+    </footer>
+
+    <!-- Scripts -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        const uploadArea = document.getElementById('uploadArea');
+        const fileInput = document.getElementById('fileInput');
+        const browseBtn = document.getElementById('browseBtn');
+        const uploadForm = document.getElementById('uploadForm');
+        const loadingSpinner = document.getElementById('loadingSpinner');
+        const errorAlert = document.getElementById('errorAlert');
+        const resultsContainer = document.getElementById('resultsContainer');
+
+        // Browse button
+        browseBtn.addEventListener('click', () => fileInput.click());
+
+        // File input change
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length > 0) {
+                uploadFile(e.target.files[0]);
+            }
+        });
+
+        // Drag and drop
+        uploadArea.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadArea.classList.add('dragover');
+        });
+
+        uploadArea.addEventListener('dragleave', () => {
+            uploadArea.classList.remove('dragover');
+        });
+
+        uploadArea.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadArea.classList.remove('dragover');
+            if (e.dataTransfer.files.length > 0) {
+                uploadFile(e.dataTransfer.files[0]);
+            }
+        });
+
+        function uploadFile(file) {
+            // Validate file
+            const validExtensions = ['exe', 'dll', 'bin', 'scr', 'sys', 'com'];
+            const fileExt = file.name.split('.').pop().toLowerCase();
+            
+            if (!validExtensions.includes(fileExt)) {
+                showError('Invalid file type. Please upload an executable file.');
+                return;
+            }
+
+            if (file.size > 50 * 1024 * 1024) {
+                showError('File too large. Maximum size is 50MB.');
+                return;
+            }
+
+            // Show loading
+            loadingSpinner.style.display = 'block';
+            errorAlert.style.display = 'none';
+            resultsContainer.style.display = 'none';
+
+            // Upload file
+            const formData = new FormData();
+            formData.append('file', file);
+
+            fetch('/api/analyze', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.json())
+            .then(data => {
+                loadingSpinner.style.display = 'none';
+                if (data.error) {
+                    showError(data.error);
+                } else {
+                    displayResults(data);
+                }
+            })
+            .catch(error => {
+                loadingSpinner.style.display = 'none';
+                showError('Error uploading file: ' + error.message);
+            });
+        }
+
+        function showError(message) {
+            errorAlert.style.display = 'block';
+            document.getElementById('errorMessage').textContent = message;
+            resultsContainer.style.display = 'none';
+        }
+
+        function displayResults(data) {
+            resultsContainer.style.display = 'block';
+
+            // Summary
+            document.getElementById('resultFilename').textContent = data.filename;
+            document.getElementById('resultSize').textContent = formatBytes(data.file_size);
+            document.getElementById('resultArch').textContent = data.pe_analysis.architecture || 'Unknown';
+            document.getElementById('resultEntryPoint').textContent = data.pe_analysis.entry_point || 'N/A';
+
+            // Obfuscation Status
+            const obf = data.obfuscation;
+            document.getElementById('obfuscationScore').textContent = obf.score;
+            document.getElementById('scoreProgress').style.width = obf.score + '%';
+            document.getElementById('scoreProgress').className = 'progress-bar bg-' + obf.color;
+
+            const badgeClass = {
+                'danger': 'bg-danger',
+                'warning': 'bg-warning text-dark',
+                'info': 'bg-info',
+                'success': 'bg-success'
+            }[obf.color] || 'bg-info';
+
+            document.getElementById('obfuscationBadge').className = 'obfuscation-badge ' + badgeClass;
+            document.getElementById('obfuscationBadge').innerHTML = '<i class="fas fa-shield-alt"></i> ' + obf.status;
+
+            // Indicators
+            let indicatorsHTML = '';
+            if (obf.details.length > 0) {
+                obf.details.forEach(detail => {
+                    indicatorsHTML += `
+                        <div class="indicator-item ${detail.severity}">
+                            <strong>${detail.indicator}</strong>
+                            <span class="severity-badge ${detail.severity}">${detail.severity}</span>
+                            <br>
+                            <small class="text-muted">${detail.reason}</small>
+                            <br>
+                            <small><strong>Value:</strong> ${detail.value}</small>
+                        </div>
+                    `;
+                });
+            } else {
+                indicatorsHTML = '<div class="alert alert-success">No obfuscation indicators detected</div>';
+            }
+            document.getElementById('indicatorsList').innerHTML = indicatorsHTML;
+
+            // Entropy
+            const entropy = data.pe_analysis.total_entropy;
+            document.getElementById('entropyValue').textContent = entropy.toFixed(4);
+            document.getElementById('entropyBar').style.width = (entropy / 8 * 100) + '%';
+
+            let entropyInterpretation = '';
+            if (entropy > 7.2) {
+                entropyInterpretation = '<strong style="color: #c0392b;">Very High (>7.2)</strong> - File is likely encrypted or packed. Strong obfuscation detected.';
+            } else if (entropy > 6.5) {
+                entropyInterpretation = '<strong style="color: #f39c12;">High (6.5-7.2)</strong> - Possible compression or encryption detected.';
+            } else if (entropy > 5.0) {
+                entropyInterpretation = '<strong style="color: #3498db;">Moderate (5.0-6.5)</strong> - Typical for mixed code and data sections.';
+            } else {
+                entropyInterpretation = '<strong style="color: #27ae60;">Low (<5.0)</strong> - Low entropy, likely unobfuscated or well-compressed.';
+            }
+            document.getElementById('entropyInterpretation').innerHTML = entropyInterpretation;
+
+            // Sections
+            let sectionsHTML = '';
+            data.pe_analysis.sections.forEach(section => {
+                const entropyColor = section.entropy > 7.2 ? '#c0392b' : (section.entropy > 6.5 ? '#f39c12' : '#27ae60');
+                sectionsHTML += `
+                    <div class="section-info">
+                        <div class="d-flex justify-content-between align-items-center">
+                            <div>
+                                <strong>${section.name}</strong>
+                                <br>
+                                <small class="text-muted">VA: ${section.virtual_address} | Size: ${formatBytes(section.actual_size)}</small>
+                            </div>
+                            <div style="color: ${entropyColor}; font-weight: bold;">
+                                Entropy: ${section.entropy.toFixed(4)}
+                            </div>
+                        </div>
+                        <div style="margin-top: 8px;">
+                            <small>Characteristics: ${section.characteristics.join(', ') || 'None'}</small>
+                        </div>
+                    </div>
+                `;
+            });
+            document.getElementById('sectionsList').innerHTML = sectionsHTML || '<p class="text-muted">No sections found</p>';
+
+            // Imports
+            let suspiciousHTML = '';
+            if (data.pe_analysis.suspicious_imports.length > 0) {
+                suspiciousHTML = '<div class="alert alert-warning"><strong>Suspicious APIs Detected:</strong><ul class="mb-0">';
+                data.pe_analysis.suspicious_imports.forEach(imp => {
+                    suspiciousHTML += `<li>${imp.dll} → <strong>${imp.api}</strong></li>`;
+                });
+                suspiciousHTML += '</ul></div>';
+            }
+            document.getElementById('suspiciousImportsList').innerHTML = suspiciousHTML;
+
+            let allImportsHTML = '<h6>All Imports (' + data.pe_analysis.imports.length + ')</h6>';
+            if (data.pe_analysis.imports.length > 0) {
+                allImportsHTML += '<div style="max-height: 300px; overflow-y: auto;"><small><ul class="mb-0">';
+                data.pe_analysis.imports.slice(0, 50).forEach(imp => {
+                    allImportsHTML += `<li>${imp.dll} → ${imp.api}</li>`;
+                });
+                if (data.pe_analysis.imports.length > 50) {
+                    allImportsHTML += `<li><em>... and ${data.pe_analysis.imports.length - 50} more</em></li>`;
+                }
+                allImportsHTML += '</ul></small></div>';
+            } else {
+                allImportsHTML += '<p class="text-muted">No imports found</p>';
+            }
+            document.getElementById('allImportsList').innerHTML = allImportsHTML;
+
+            // XOR Detection
+            let xorHTML = '';
+            if (data.xor_analysis.xor_keys.length > 0) {
+                xorHTML = '<div class="alert alert-warning"><strong>Potential XOR Keys Found:</strong><br>';
+                xorHTML += data.xor_analysis.xor_keys.join(', ');
+                xorHTML += '</div><p class="text-muted">These keys matched known malware strings in the first 8KB of the file.</p>';
+            } else {
+                xorHTML = '<p class="text-muted">No common XOR patterns detected</p>';
+            }
+            document.getElementById('xorList').innerHTML = xorHTML;
+        }
+
+        function formatBytes(bytes) {
+            if (bytes === 0) return '0 Bytes';
+            const k = 1024;
+            const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
+        }
+    </script>
+</body>
+</html>

@@ -2,3 +2,5 @@ pefile
 capstone
 yara-python
 xortool
+flask
+werkzeug
