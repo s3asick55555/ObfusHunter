@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Legacy advanced analysis CLI backed by the unified analysis engine."""
+"""Advanced Windows PE analysis CLI backed by the presentation-scope engine."""
 
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ from analysis_engine import analyze_binary
 def analyze_pe(file_path: str) -> None:
     result = analyze_binary(file_path)
     pe = result["pe_analysis"]
-    content = result["content_indicators"]
 
     print(f"--- Advanced Obfuscation Analysis: {os.path.basename(file_path)} ---")
 
@@ -39,19 +38,18 @@ def analyze_pe(file_path: str) -> None:
         for row in pe["suspicious_imports"][:10]:
             print(f"    {row['dll']}!{row['api']}")
 
-    base64_strings = content["base64_sequences"]
-    if base64_strings["count"]:
-        print(f"\n[Base64 Strings] Found {base64_strings['count']} potential Base64 strings.")
-        for value in base64_strings["examples"][:5]:
-            print(f"  {value[:50]}...")
+    import_obf = pe.get("import_obfuscation", {})
+    if import_obf.get("dynamic_resolution_apis"):
+        print("\n[Import Obfuscation]")
+        print(f"  Dynamic resolver APIs: {', '.join(import_obf['dynamic_resolution_apis'])}")
 
-    padding = content["padding"]
-    if padding["has_large_null_padding"] or padding["has_large_repeated_byte_run"]:
-        print("\n[Binary Padding]")
-        print(
-            "  [!] Significant repeated-byte padding detected "
-            f"({padding['largest_repeated_byte']} x {padding['largest_repeated_run']})."
-        )
+    xor_analysis = result["xor_analysis"]
+    if xor_analysis.get("xor_keys") or xor_analysis.get("stack_string_xor_hits"):
+        print("\n[XOR Indicators]")
+        if xor_analysis.get("xor_keys"):
+            print(f"  Single-byte XOR keys with printable decoded strings: {', '.join(xor_analysis['xor_keys'][:5])}")
+        if xor_analysis.get("stack_string_xor_hits"):
+            print(f"  Stack-based XOR string patterns: {len(xor_analysis['stack_string_xor_hits'])}")
 
     techniques = result["obfuscation"]["possible_techniques"]
     if techniques:

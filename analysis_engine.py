@@ -1,19 +1,11 @@
 #!/usr/bin/env python3
-"""
-Unified static analysis engine for obfuscation detection.
-
-This module merges the original repository heuristics with the more complete
-web-oriented implementation from `obfuscation_detector_web/`.
-"""
+"""Static Windows PE obfuscation analyzer for the ideas3.md presentation scope."""
 
 from __future__ import annotations
 
 import math
 import os
-import re
 import statistics
-import base64
-import binascii
 from collections import Counter, deque
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -21,7 +13,6 @@ from typing import Any, Dict, List, Optional, Tuple
 import pefile
 from capstone import CS_ARCH_X86, CS_MODE_32, CS_MODE_64, Cs
 from capstone.x86 import X86_OP_IMM, X86_OP_MEM, X86_REG_EIP, X86_REG_INVALID, X86_REG_RIP
-
 
 SUSPICIOUS_APIS = {
     "VirtualAlloc",
@@ -61,22 +52,37 @@ COMMON_PACKER_SECTION_NAMES = {
     ".rsrc1",
 }
 
-XOR_TARGETS = [
-    b"http://",
-    b"https://",
-    b"cmd.exe",
-    b"powershell.exe",
-    b"VirtualAlloc",
-    b"WriteProcessMemory",
-    b"CreateRemoteThread",
-    b"GetProcAddress",
-    b"LoadLibrary",
-    b"kernel32",
-    b"user32",
-    b"advapi32",
-]
+MIN_XOR_PRINTABLE_LENGTH = 8
+MAX_XOR_KEYS_REPORTED = 8
+MAX_XOR_BYTES_PER_REGION = 512 * 1024
+TEXT_PUNCTUATION_BYTES = set(b" .,;:'\"!?()[]/-_\\")
+TEXT_VOWEL_BYTES = set(b"aeiouAEIOU")
+TEXT_TRAILING_PUNCTUATION_BYTES = set(b".,;:!?)]\"'")
+TEXT_SUSPICIOUS_SEPARATOR_BYTES = set(b"#$%&*+=|{}<>`~")
+XOR_PRIMARY_SECTION_PRIORITIES = {
+    ".data": 0,
+    ".rdata": 1,
+    ".sdata": 2,
+}
+XOR_NOISY_SECTION_NAMES = {
+    ".debug",
+    ".edata",
+    ".idata",
+    ".pdata",
+    ".reloc",
+    ".rsrc",
+    ".tls",
+}
 
-BASE64_PATTERN = re.compile(rb"[A-Za-z0-9+/]{12,}={0,2}")
+DYNAMIC_RESOLUTION_APIS = {
+    "loadlibrarya",
+    "loadlibraryw",
+    "loadlibraryexa",
+    "loadlibraryexw",
+    "getprocaddress",
+    "ldrloaddll",
+    "ldrgetprocedureaddress",
+}
 
 
 def calculate_entropy(data: bytes) -> float:
@@ -103,6 +109,166 @@ def printable_ascii_ratio(data: bytes) -> float:
     return printable / len(data)
 
 
+def is_printable_ascii_byte(value: int) -> bool:
+    return 32 <= value <= 126
+
+
+def longest_alpha_run(value: bytes) -> int:
+    longest = 0
+    current = 0
+    for byte in value:
+        if 65 <= byte <= 90 or 97 <= byte <= 122:
+            current += 1
+            longest = max(longest, current)
+        else:
+            current = 0
+    return longest
+
+
+def printable_text_score(value: bytes) -> float:
+    """Estimate whether printable bytes look like readable text, not just symbols."""
+    if not value:
+        return 0.0
+
+    length = len(value)
+    printable_count = sum(1 for b in value if is_printable_ascii_byte(b))
+    printable_ratio = printable_count / length
+    if printable_ratio < 0.85:
+        return round(printable_ratio * 0.25, 3)
+
+    alpha_count = sum(1 for b in value if 65 <= b <= 90 or 97 <= b <= 122)
+    digit_count = sum(1 for b in value if 48 <= b <= 57)
+    whitespace_count = sum(1 for b in value if b in (9, 10, 13, 32))
+    punctuation_count = sum(1 for b in value if b in TEXT_PUNCTUATION_BYTES)
+    vowel_count = sum(1 for b in value if b in TEXT_VOWEL_BYTES)
+    suspicious_separator_count = sum(1 for b in value if b in TEXT_SUSPICIOUS_SEPARATOR_BYTES)
+    wordish_count = alpha_count + digit_count + whitespace_count + punctuation_count
+    unusual_count = max(0, printable_count - wordish_count)
+    most_common_ratio = Counter(value).most_common(1)[0][1] / length
+
+    alpha_ratio = alpha_count / length
+    digit_ratio = digit_count / length
+    punctuation_ratio = punctuation_count / length
+    unusual_ratio = unusual_count / length
+
+    score = printable_ratio * 0.30
+    score += min(alpha_ratio / 0.55, 1.0) * 0.45
+    score += min((wordish_count / length) / 0.90, 1.0) * 0.10
+    if whitespace_count:
+        score += 0.08
+    if longest_alpha_run(value) >= 4:
+        score += 0.10
+    if alpha_count >= 5:
+        vowel_ratio = vowel_count / alpha_count
+        if 0.20 <= vowel_ratio <= 0.55:
+            score += 0.08
+        elif vowel_ratio < 0.15 or vowel_ratio > 0.70:
+            score -= 0.20
+
+    if digit_ratio > 0.45:
+        score -= min((digit_ratio - 0.45) / 0.35, 1.0) * 0.10
+    if punctuation_ratio > 0.50:
+        score -= min((punctuation_ratio - 0.50) / 0.30, 1.0) * 0.15
+    if unusual_ratio > 0.10:
+        score -= min((unusual_ratio - 0.10) / 0.25, 1.0) * 0.15
+    if suspicious_separator_count:
+        score -= min(suspicious_separator_count / 3, 1.0) * 0.12
+    if most_common_ratio > 0.35:
+        score -= min((most_common_ratio - 0.35) / 0.40, 1.0) * 0.15
+
+    return round(max(0.0, min(1.0, score)), 3)
+
+
+def is_interesting_printable_string(value: bytes) -> bool:
+    """Filter out padding-like printable runs after XOR decoding."""
+    if len(value) < MIN_XOR_PRINTABLE_LENGTH:
+        return False
+
+    if not any((65 <= b <= 90) or (97 <= b <= 122) or (48 <= b <= 57) for b in value):
+        return False
+
+    counts = Counter(value)
+    if len(counts) < 4:
+        return False
+
+    most_common_ratio = counts.most_common(1)[0][1] / len(value)
+    return most_common_ratio <= 0.65 and printable_text_score(value) >= 0.55
+
+
+def trim_printable_run(offset: int, value: bytes) -> Tuple[int, bytes]:
+    """Drop punctuation-only edges that often come from decoded padding bytes."""
+    start = 0
+    end = len(value)
+    while start < end and not (
+        48 <= value[start] <= 57 or 65 <= value[start] <= 90 or 97 <= value[start] <= 122
+    ):
+        start += 1
+    while end > start and not (
+        48 <= value[end - 1] <= 57
+        or 65 <= value[end - 1] <= 90
+        or 97 <= value[end - 1] <= 122
+        or value[end - 1] in TEXT_TRAILING_PUNCTUATION_BYTES
+    ):
+        end -= 1
+    return offset + start, value[start:end]
+
+
+def classify_xor_decode(original: bytes, decoded: bytes) -> Optional[Dict[str, Any]]:
+    """Return evidence metadata when XOR output is materially text-like."""
+    if not is_interesting_printable_string(decoded):
+        return None
+
+    original_printable_ratio = printable_ascii_ratio(original)
+    decoded_text_score = printable_text_score(decoded)
+    original_text_score = printable_text_score(original)
+
+    if original_printable_ratio < 0.35:
+        return {
+            "reason": "ciphertext bytes were mostly non-printable",
+            "text_score": decoded_text_score,
+            "original_printable_ratio": round(original_printable_ratio, 3),
+        }
+
+    if decoded_text_score >= 0.72 and decoded_text_score - original_text_score >= 0.30:
+        return {
+            "reason": "decoded bytes are more text-like than ciphertext",
+            "text_score": decoded_text_score,
+            "original_text_score": original_text_score,
+            "original_printable_ratio": round(original_printable_ratio, 3),
+        }
+
+    return None
+
+
+def build_xor_run_evidence(
+    original: bytes,
+    decoded: bytes,
+    start: int,
+    end: int,
+    min_length: int,
+) -> Optional[Dict[str, Any]]:
+    segment = decoded[start:end]
+    original_segment = original[start:end]
+    trimmed_start, trimmed_segment = trim_printable_run(start, segment)
+    trim_delta = trimmed_start - start
+    trimmed_original = original_segment[trim_delta:trim_delta + len(trimmed_segment)]
+
+    if len(trimmed_segment) < min_length:
+        return None
+
+    classification = classify_xor_decode(trimmed_original, trimmed_segment)
+    if not classification:
+        return None
+
+    evidence = {
+        "offset": hex(trimmed_start),
+        "length": len(trimmed_segment),
+        "decoded": trimmed_segment[:80].decode("ascii", errors="ignore"),
+    }
+    evidence.update(classification)
+    return evidence
+
+
 def zero_ratio(data: bytes) -> float:
     """Ratio of null bytes."""
     if not data:
@@ -112,6 +278,11 @@ def zero_ratio(data: bytes) -> float:
 
 def safe_decode(value: bytes) -> str:
     return value.decode(errors="ignore").strip("\x00").strip()
+
+
+def detect_binary_format(file_path: str) -> str:
+    """Best-effort file type detection for the current PE-only baseline build."""
+    return "pe"
 
 
 def format_instruction_bytes(raw_bytes: bytes) -> str:
@@ -154,6 +325,14 @@ def get_capstone_engine(machine: int) -> Optional[Cs]:
 
     md.detail = True
     return md
+
+
+def get_pointer_size(machine: int) -> int:
+    if machine == 0x14C:
+        return 4
+    if machine == 0x8664:
+        return 8
+    return 4
 
 
 def is_dotnet_pe(pe: pefile.PE) -> bool:
@@ -202,6 +381,254 @@ def get_memory_operand_target(insn: Any) -> Optional[int]:
     return None
 
 
+def get_memory_xor_immediate_key(insn: Any) -> Optional[int]:
+    """Detect instructions like `xor byte ptr [addr/reg], 5Ah`."""
+    if insn.mnemonic.lower() != "xor":
+        return None
+    if not getattr(insn, "operands", None) or len(insn.operands) != 2:
+        return None
+
+    destination, source = insn.operands
+    if destination.type != X86_OP_MEM or source.type != X86_OP_IMM:
+        return None
+
+    key = int(source.imm) & 0xff
+    if key == 0:
+        return None
+    return key
+
+
+def immediate_to_little_endian_bytes(value: int, size: int) -> bytes:
+    width = max(int(size or 1), 1)
+    mask = (1 << (width * 8)) - 1
+    return int(value & mask).to_bytes(width, byteorder="little", signed=False)
+
+
+def get_stack_memory_reference(insn: Any, operand: Any, stack_depth: int) -> Optional[Dict[str, Any]]:
+    if operand.type != X86_OP_MEM:
+        return None
+
+    try:
+        base_name = insn.reg_name(operand.mem.base).lower()
+    except Exception:
+        return None
+
+    if base_name in {"esp", "rsp"}:
+        base_kind = "sp"
+    elif base_name in {"ebp", "rbp"}:
+        base_kind = "bp"
+    else:
+        return None
+
+    disp = int(getattr(operand.mem, "disp", 0) or 0)
+    size = max(int(getattr(operand, "size", 0) or 1), 1)
+    resolved_offset = stack_depth + disp if base_kind == "sp" else disp
+    return {
+        "base_kind": base_kind,
+        "offset": resolved_offset,
+        "size": size,
+    }
+
+
+def extract_ascii_from_stack_snapshot(
+    snapshot: Dict[Tuple[str, int], int],
+    base_kind: str,
+    offsets: set[int],
+    min_length: int = 4,
+) -> Optional[str]:
+    if not offsets:
+        return None
+
+    segments: List[str] = []
+    current: List[int] = []
+    for offset in range(min(offsets), max(offsets) + 1):
+        value = snapshot.get((base_kind, offset))
+        if value is None:
+            if len(current) >= min_length:
+                segments.append(bytes(current).decode("ascii", errors="ignore"))
+            current = []
+            continue
+        if 32 <= value <= 126:
+            current.append(value)
+        else:
+            if len(current) >= min_length:
+                segments.append(bytes(current).decode("ascii", errors="ignore"))
+            current = []
+
+    if len(current) >= min_length:
+        segments.append(bytes(current).decode("ascii", errors="ignore"))
+
+    if not segments:
+        return None
+
+    preview = segments[0]
+    return preview[:32] + ("..." if len(preview) > 32 else "")
+
+
+def detect_stack_string_xor_patterns(
+    disassembled: List[Any],
+    section_name: str,
+    pointer_size: int,
+    max_hits: int = 10,
+) -> List[Dict[str, Any]]:
+    """Detect stack-built bytes that are XOR-decoded in place on the stack."""
+    hits: List[Dict[str, Any]] = []
+    stack_depth = 0
+    stack_bytes: Dict[Tuple[str, int], int] = {}
+    recent_writes: List[Dict[str, Any]] = []
+    active_candidate: Optional[Dict[str, Any]] = None
+
+    def reset_tracking() -> None:
+        nonlocal stack_depth, stack_bytes, recent_writes, active_candidate
+        stack_depth = 0
+        stack_bytes = {}
+        recent_writes = []
+        active_candidate = None
+
+    def finalize_candidate() -> None:
+        nonlocal active_candidate
+        if active_candidate is None:
+            return
+        if len(active_candidate["xor_instructions"]) < 2 or len(active_candidate["offsets"]) < 2:
+            active_candidate = None
+            return
+
+        decoded_preview = extract_ascii_from_stack_snapshot(
+            active_candidate["snapshot"],
+            active_candidate["base_kind"],
+            active_candidate["offsets"],
+        )
+        if not decoded_preview:
+            active_candidate = None
+            return
+
+        key_text = ", ".join(sorted(set(active_candidate["keys"]))[:4])
+        pattern = "stack-built bytes XOR-decoded on the stack"
+        pattern += f" -> {decoded_preview}"
+        if key_text:
+            pattern += f" (keys: {key_text})"
+
+        instructions = active_candidate["write_instructions"] + active_candidate["xor_instructions"]
+        hits.append({
+            "block": hex(active_candidate["address"]),
+            "section": section_name,
+            "pattern": pattern,
+            "instructions": instructions[:10],
+        })
+        active_candidate = None
+
+    for index, insn in enumerate(disassembled):
+        mnemonic = insn.mnemonic.lower()
+        operands = list(getattr(insn, "operands", []) or [])
+
+        if mnemonic == "push" and operands and operands[0].type == X86_OP_IMM:
+            stack_depth -= pointer_size
+            raw = immediate_to_little_endian_bytes(int(operands[0].imm), pointer_size)
+            for byte_index, value in enumerate(raw):
+                stack_bytes[("sp", stack_depth + byte_index)] = value
+            recent_writes.append({
+                "index": index,
+                "base_kind": "sp",
+                "offset": stack_depth,
+                "size": len(raw),
+                "instruction": build_instruction_evidence(insn, section_name, note="push immediate stack data"),
+            })
+        elif mnemonic == "pop":
+            stack_depth += pointer_size
+        elif (
+            mnemonic in {"sub", "add"}
+            and len(operands) == 2
+            and operands[0].type != X86_OP_IMM
+            and operands[1].type == X86_OP_IMM
+        ):
+            try:
+                reg_name = insn.reg_name(operands[0].reg).lower()
+            except Exception:
+                reg_name = ""
+            adjust = int(operands[1].imm)
+            if reg_name in {"esp", "rsp"}:
+                if mnemonic == "sub":
+                    stack_depth -= adjust
+                else:
+                    stack_depth += adjust
+        elif mnemonic == "mov" and len(operands) == 2 and operands[1].type == X86_OP_IMM:
+            stack_ref = get_stack_memory_reference(insn, operands[0], stack_depth)
+            if stack_ref is not None:
+                raw = immediate_to_little_endian_bytes(int(operands[1].imm), stack_ref["size"])
+                for byte_index, value in enumerate(raw):
+                    stack_bytes[(stack_ref["base_kind"], stack_ref["offset"] + byte_index)] = value
+                recent_writes.append({
+                    "index": index,
+                    "base_kind": stack_ref["base_kind"],
+                    "offset": stack_ref["offset"],
+                    "size": stack_ref["size"],
+                    "instruction": build_instruction_evidence(insn, section_name, note="immediate stack write"),
+                })
+        elif mnemonic == "xor" and len(operands) == 2 and operands[1].type == X86_OP_IMM:
+            stack_ref = get_stack_memory_reference(insn, operands[0], stack_depth)
+            if stack_ref is not None:
+                raw_key = immediate_to_little_endian_bytes(int(operands[1].imm), stack_ref["size"])
+                touched_offsets = set(range(stack_ref["offset"], stack_ref["offset"] + stack_ref["size"]))
+                for byte_index, key_byte in enumerate(raw_key):
+                    slot = (stack_ref["base_kind"], stack_ref["offset"] + byte_index)
+                    if slot in stack_bytes:
+                        stack_bytes[slot] ^= key_byte
+
+                write_matches = [
+                    event
+                    for event in recent_writes
+                    if index - event["index"] <= 24
+                    and event["base_kind"] == stack_ref["base_kind"]
+                    and abs(event["offset"] - stack_ref["offset"]) <= 64
+                ]
+
+                if write_matches:
+                    if (
+                        active_candidate is not None
+                        and (
+                            active_candidate["base_kind"] != stack_ref["base_kind"]
+                            or index - active_candidate["last_index"] > 8
+                        )
+                    ):
+                        finalize_candidate()
+
+                    if active_candidate is None:
+                        active_candidate = {
+                            "address": insn.address,
+                            "base_kind": stack_ref["base_kind"],
+                            "last_index": index,
+                            "offsets": set(),
+                            "keys": [],
+                            "write_instructions": [event["instruction"] for event in write_matches[:4]],
+                            "xor_instructions": [],
+                            "snapshot": dict(stack_bytes),
+                        }
+
+                    active_candidate["last_index"] = index
+                    active_candidate["offsets"].update(touched_offsets)
+                    active_candidate["keys"].append(f"0x{int(operands[1].imm) & ((1 << (stack_ref['size'] * 8)) - 1):0{stack_ref['size'] * 2}x}")
+                    active_candidate["xor_instructions"].append(
+                        build_instruction_evidence(insn, section_name, note="stack XOR decode")
+                    )
+                    active_candidate["snapshot"] = dict(stack_bytes)
+
+        recent_writes = [event for event in recent_writes if index - event["index"] <= 32]
+
+        if mnemonic in {"ret", "retn", "retf", "jmp"}:
+            finalize_candidate()
+            reset_tracking()
+            continue
+
+        if active_candidate is not None and index - active_candidate["last_index"] > 8:
+            finalize_candidate()
+
+        if len(hits) >= max_hits:
+            break
+
+    finalize_candidate()
+    return hits[:max_hits]
+
+
 def classify_architecture(machine: int) -> str:
     if machine == 0x14C:
         return "x86 (32-bit)"
@@ -234,116 +661,213 @@ def extract_imports(pe: pefile.PE) -> Tuple[List[Dict[str, str]], List[Dict[str,
     return imports, suspicious
 
 
-def detect_xor_strings(file_path: str, sample_size: int = 2 * 1024 * 1024) -> Dict[str, Any]:
+def get_import_names(imports: List[Dict[str, str]]) -> set[str]:
+    return {str(row.get("api", "")).lower() for row in imports}
+
+
+def summarize_import_obfuscation(imports: List[Dict[str, str]]) -> Dict[str, Any]:
+    import_names = get_import_names(imports)
+    dynamic_apis = sorted(api for api in import_names if api in DYNAMIC_RESOLUTION_APIS)
+    return {
+        "import_count": len(imports),
+        "dynamic_resolution_apis": dynamic_apis,
+        "has_loadlibrary": any(api.startswith("loadlibrary") or api == "ldrloaddll" for api in dynamic_apis),
+        "has_getprocaddress": any(api in {"getprocaddress", "ldrgetprocedureaddress"} for api in dynamic_apis),
+        "evidence": [
+            row for row in imports
+            if str(row.get("api", "")).lower() in DYNAMIC_RESOLUTION_APIS
+        ][:12],
+    }
+
+
+def normalize_section_name(name: str) -> str:
+    return (name or "").strip().lower().split("$", 1)[0]
+
+
+def get_xor_section_priority(section: pefile.SectionStructure) -> Optional[int]:
+    """Rank PE sections for string-decode scans, preferring real string/data areas."""
+    if section_is_executable(section):
+        return None
+
+    name = normalize_section_name(safe_decode(section.Name))
+    if name in XOR_NOISY_SECTION_NAMES:
+        return None
+    if name in XOR_PRIMARY_SECTION_PRIORITIES:
+        return XOR_PRIMARY_SECTION_PRIORITIES[name]
+    if section_is_writable(section):
+        return 10
+    if section_is_readable(section):
+        return 20
+    return 30
+
+
+def get_xor_scan_regions(file_path: str, sample_size: int) -> List[Dict[str, Any]]:
+    """Prefer PE data sections for XOR string scans; fall back to raw bytes."""
+    regions: List[Dict[str, Any]] = []
+
+    try:
+        pe = pefile.PE(file_path, fast_load=True)
+        candidates = []
+        for section in pe.sections:
+            priority = get_xor_section_priority(section)
+            if priority is None:
+                continue
+
+            data = section.get_data()
+            if len(data) < MIN_XOR_PRINTABLE_LENGTH:
+                continue
+
+            candidates.append((
+                priority,
+                int(section.PointerToRawData),
+                safe_decode(section.Name) or "section",
+                data,
+            ))
+
+        remaining = sample_size
+        for _, offset, name, data in sorted(candidates, key=lambda item: (item[0], item[1])):
+            if remaining <= 0:
+                break
+            region_size = min(len(data), remaining, MAX_XOR_BYTES_PER_REGION)
+            regions.append({
+                "name": name,
+                "offset": offset,
+                "data": data[:region_size],
+            })
+            remaining -= region_size
+    except Exception:
+        regions = []
+
+    if regions:
+        return regions
+
+    data = Path(file_path).read_bytes()[:sample_size]
+    return [{"name": "file", "offset": 0, "data": data}]
+
+
+def find_printable_xor_runs(
+    original: bytes,
+    decoded: bytes,
+    min_length: int = MIN_XOR_PRINTABLE_LENGTH,
+    limit: int = 8,
+    base_offset: int = 0,
+    region_name: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    runs: List[Dict[str, Any]] = []
+    start: Optional[int] = None
+
+    for index, value in enumerate(decoded):
+        if is_printable_ascii_byte(value):
+            if start is None:
+                start = index
+            continue
+
+        if start is not None:
+            evidence = build_xor_run_evidence(original, decoded, start, index, min_length)
+            if evidence:
+                evidence["offset"] = hex(base_offset + int(evidence["offset"], 16))
+                if region_name:
+                    evidence["region"] = region_name
+                runs.append(evidence)
+                if len(runs) >= limit:
+                    return runs
+            start = None
+
+    if start is not None:
+        evidence = build_xor_run_evidence(original, decoded, start, len(decoded), min_length)
+        if evidence:
+            evidence["offset"] = hex(base_offset + int(evidence["offset"], 16))
+            if region_name:
+                evidence["region"] = region_name
+            runs.append(evidence)
+
+    return runs[:limit]
+
+
+def detect_xor_strings(
+    file_path: str,
+    pe_analysis: Optional[Dict[str, Any]] = None,
+    sample_size: int = 2 * 1024 * 1024,
+) -> Dict[str, Any]:
     """
     Quick XOR-key scan.
 
-    This intentionally checks only single-byte XOR and is kept separate from
-    the more exhaustive standalone XOR utilities in the repository.
+    This checks single-byte XOR keys by looking for readable printable strings:
+    either ciphertext becomes printable, or already-printable ciphertext becomes
+    materially more text-like after decoding. It does not match against a fixed
+    list of common malware strings.
     """
     result: Dict[str, Any] = {
         "xor_keys": [],
         "hits": [],
+        "stack_string_xor_hits": [],
         "tested_bytes": 0,
+        "scan_regions": [],
     }
 
     try:
-        data = Path(file_path).read_bytes()[:sample_size]
-        result["tested_bytes"] = len(data)
+        regions = get_xor_scan_regions(file_path, sample_size)
+        result["scan_regions"] = [
+            {"name": region["name"], "offset": hex(region["offset"]), "size": len(region["data"])}
+            for region in regions
+        ]
+        result["tested_bytes"] = sum(len(region["data"]) for region in regions)
 
+        hinted_keys = set()
+        if pe_analysis:
+            cap_summary = pe_analysis.get("capstone", {}).get("summary", {})
+            for sample in cap_summary.get("evidence", {}).get("memory_xor_immediate_samples", []):
+                key = sample.get("key_value")
+                if isinstance(key, int) and 1 <= key <= 255:
+                    hinted_keys.add(key)
+
+        key_hits = []
         for key in range(1, 256):
-            decoded = bytes(b ^ key for b in data)
-            hit_targets = [t.decode(errors="ignore") for t in XOR_TARGETS if t in decoded]
-            if hit_targets:
-                result["xor_keys"].append(f"0x{key:02x}")
-                result["hits"].append({"key": f"0x{key:02x}", "targets": hit_targets[:5]})
+            runs = []
+            for region in regions:
+                original = region["data"]
+                decoded = bytes(b ^ key for b in original)
+                runs.extend(find_printable_xor_runs(
+                    original,
+                    decoded,
+                    limit=max(1, 8 - len(runs)),
+                    base_offset=region["offset"],
+                    region_name=region["name"],
+                ))
+                if len(runs) >= 8:
+                    break
+            if not runs:
+                continue
+            key_hits.append({
+                "key_value": key,
+                "key": f"0x{key:02x}",
+                "instruction_key_hint": key in hinted_keys,
+                "printable_string_count": len(runs),
+                "printable_character_count": sum(item["length"] for item in runs),
+                "best_text_score": max(item.get("text_score", 0.0) for item in runs),
+                "examples": runs[:5],
+            })
+
+        key_hits.sort(key=lambda item: (
+            not item["instruction_key_hint"],
+            -item["best_text_score"],
+            -item["printable_character_count"],
+            -item["printable_string_count"],
+            item["key_value"],
+        ))
+        for item in key_hits:
+            item.pop("key_value", None)
+        result["hits"] = key_hits[:MAX_XOR_KEYS_REPORTED]
+        result["xor_keys"] = [item["key"] for item in result["hits"]]
+
+        if pe_analysis:
+            cap_summary = pe_analysis.get("capstone", {}).get("summary", {})
+            result["stack_string_xor_hits"] = cap_summary.get("evidence", {}).get("stack_string_xor_samples", [])[:10]
 
         return result
     except Exception as exc:
         result["error"] = str(exc)
         return result
-
-
-def detect_base64_sequences(data: bytes, limit: int = 20) -> Dict[str, Any]:
-    """
-    Find likely Base64-encoded strings.
-
-    The old detector treated any long alphanumeric token as Base64. This
-    version decodes candidates and keeps only those that successfully decode
-    into mostly printable text, which filters out plain identifiers such as
-    `EnterCriticalSection`.
-    """
-    matches = []
-    decoded_examples = []
-    seen = set()
-
-    for match in BASE64_PATTERN.findall(data):
-        if match in seen:
-            continue
-        seen.add(match)
-
-        padded = match + (b"=" * ((4 - len(match) % 4) % 4))
-        try:
-            decoded = base64.b64decode(padded, validate=True)
-        except (binascii.Error, ValueError):
-            continue
-
-        if len(decoded) < 8:
-            continue
-
-        if printable_ascii_ratio(decoded) < 0.85:
-            continue
-
-        original = match.decode(errors="ignore")
-        decoded_text = decoded.decode(errors="ignore")
-        matches.append(original)
-        decoded_examples.append({
-            "encoded": original,
-            "decoded": decoded_text,
-        })
-
-    return {
-        "count": len(matches),
-        "examples": matches[:limit],
-        "decoded_examples": decoded_examples[:limit],
-    }
-
-
-def detect_padding_sequences(data: bytes, threshold: int = 10 * 1024) -> Dict[str, Any]:
-    """Detect unusually large repeated-byte runs such as large null padding."""
-    if not data:
-        return {
-            "has_large_null_padding": False,
-            "has_large_repeated_byte_run": False,
-            "largest_repeated_run": 0,
-            "largest_repeated_byte": None,
-        }
-
-    longest_run = 1
-    longest_byte = data[0]
-    current_run = 1
-    current_byte = data[0]
-
-    for byte in data[1:]:
-        if byte == current_byte:
-            current_run += 1
-        else:
-            if current_run > longest_run:
-                longest_run = current_run
-                longest_byte = current_byte
-            current_byte = byte
-            current_run = 1
-
-    if current_run > longest_run:
-        longest_run = current_run
-        longest_byte = current_byte
-
-    return {
-        "has_large_null_padding": b"\x00" * threshold in data,
-        "has_large_repeated_byte_run": longest_run >= threshold,
-        "largest_repeated_run": longest_run,
-        "largest_repeated_byte": f"0x{longest_byte:02x}",
-    }
 
 
 def is_conditional_jump(mnemonic: str) -> bool:
@@ -369,6 +893,24 @@ def get_direct_branch_target(insn) -> Optional[int]:
     return None
 
 
+def instruction_uses_same_operand_twice(insn: Any) -> bool:
+    operands = [part.strip().lower() for part in str(getattr(insn, "op_str", "")).split(",")]
+    return len(operands) == 2 and operands[0] and operands[0] == operands[1]
+
+
+def classify_basic_opaque_predicate(prev: Any, cur: Any) -> Optional[str]:
+    prev_mnemonic = prev.mnemonic.lower()
+    cur_mnemonic = cur.mnemonic.lower()
+    if not is_conditional_jump(cur_mnemonic):
+        return None
+
+    if prev_mnemonic in {"cmp", "test"} and instruction_uses_same_operand_twice(prev):
+        return "compare/test of the same operand forces a constant branch condition"
+    if prev_mnemonic in {"xor", "sub"} and instruction_uses_same_operand_twice(prev):
+        return "zeroing the same operand before a conditional jump forces a constant branch condition"
+    return None
+
+
 def build_cfg_for_section(
     instructions: List[Any],
     section_name: str,
@@ -389,14 +931,11 @@ def build_cfg_for_section(
             "small_block_ratio": 0.0,
             "jmp_only_block_ratio": 0.0,
             "back_edge_ratio": 0.0,
-            "dispatcher_block_count": 0,
-            "dispatcher_hub_ratio": 0.0,
-            "flattening_score": 0.0,
-            "push_ret_dispatch_count": 0,
-            "ret_thunk_count": 0,
+            "sink_vertex_count": 0,
+            "sink_vertex_ratio": 0.0,
             "suspicious_blocks": [],
+            "sink_vertices": [],
             "unreachable_blocks": [],
-            "ret_thunk_blocks": [],
             "blocks": [],
         }
 
@@ -527,49 +1066,27 @@ def build_cfg_for_section(
         and any(edge["target"] is not None for edge in block["successors"])
     ]
 
-    push_ret_dispatch_blocks = 0
-    ret_thunk_count = 0
+    sink_vertices = []
     suspicious_blocks = []
-    ret_thunk_evidence = []
 
     for block in block_entries:
         instructions_in_block = block["instructions"]
-        if len(instructions_in_block) == 2:
-            first = instructions_in_block[0]
-            second = instructions_in_block[1]
-            if first.mnemonic.lower() == "push" and get_direct_branch_target(first) is not None and is_return(second.mnemonic.lower()):
-                push_ret_dispatch_blocks += 1
-                suspicious_blocks.append({
-                    "block": hex(block["start"]),
-                    "pattern": "push immediate; ret dispatch stub",
-                    "instructions": [
-                        build_instruction_evidence(first, section=section_name, note="push target"),
-                        build_instruction_evidence(second, section=section_name, note="ret dispatch"),
-                    ],
-                })
-
-        if len(instructions_in_block) == 1 and is_return(instructions_in_block[0].mnemonic.lower()):
-            ret_thunk_count += 1
-            ret_thunk_evidence.append({
+        if (
+            not block["successors"]
+            and not is_return(block["terminator"])
+            and block["terminator"] not in {"jmp", "call"}
+        ):
+            sink_entry = {
                 "block": hex(block["start"]),
-                "instruction": build_instruction_evidence(instructions_in_block[0], section=section_name, note="ret-only thunk block"),
-            })
-
-    dispatcher_blocks = []
-    for block in block_entries:
-        indegree = len(set(block["predecessors"]))
-        direct_successors = [edge for edge in block["successors"] if edge["target"] is not None]
-        outdegree = len({edge["target"] for edge in direct_successors})
-        if (indegree >= 4 and outdegree >= 2) or (indegree >= 3 and outdegree >= 3):
-            dispatcher_blocks.append(block)
-            suspicious_blocks.append({
-                "block": hex(block["start"]),
-                "pattern": f"dispatcher-like hub (in={indegree}, out={outdegree})",
+                "terminator": block["terminator"],
+                "pattern": "basic block ends without a normal exit edge; possible junk or decode dead-end",
                 "instructions": [
                     build_instruction_evidence(insn, section=section_name)
-                    for insn in block["instructions"][:3]
+                    for insn in instructions_in_block[:3]
                 ],
-            })
+            }
+            sink_vertices.append(sink_entry)
+            suspicious_blocks.append(sink_entry)
 
     block_count = len(block_entries)
     reachable_count = len(reachable)
@@ -578,15 +1095,8 @@ def build_cfg_for_section(
     small_block_ratio = len(small_blocks) / block_count if block_count else 0.0
     jmp_only_block_ratio = len(jmp_only_blocks) / block_count if block_count else 0.0
     back_edge_ratio = back_edge_count / edge_count if edge_count else 0.0
-    dispatcher_hub_ratio = len(dispatcher_blocks) / block_count if block_count else 0.0
     unreachable_block_ratio = unreachable_count / block_count if block_count else 0.0
-    flattening_score = min(
-        1.0,
-        dispatcher_hub_ratio * 2.0
-        + jmp_only_block_ratio
-        + min(back_edge_ratio, 0.5)
-        + min(unreachable_block_ratio, 0.5) / 2.0,
-    )
+    sink_vertex_ratio = len(sink_vertices) / block_count if block_count else 0.0
 
     return {
         "entry_block": hex(entry_block) if entry_block is not None else None,
@@ -600,12 +1110,10 @@ def build_cfg_for_section(
         "small_block_ratio": round(small_block_ratio, 6),
         "jmp_only_block_ratio": round(jmp_only_block_ratio, 6),
         "back_edge_ratio": round(back_edge_ratio, 6),
-        "dispatcher_block_count": len(dispatcher_blocks),
-        "dispatcher_hub_ratio": round(dispatcher_hub_ratio, 6),
-        "flattening_score": round(flattening_score, 6),
-        "push_ret_dispatch_count": push_ret_dispatch_blocks,
-        "ret_thunk_count": ret_thunk_count,
+        "sink_vertex_count": len(sink_vertices),
+        "sink_vertex_ratio": round(sink_vertex_ratio, 6),
         "suspicious_blocks": suspicious_blocks[:25],
+        "sink_vertices": sink_vertices[:25],
         "unreachable_blocks": [
             {
                 "block": hex(block["start"]),
@@ -618,7 +1126,6 @@ def build_cfg_for_section(
             for block in block_entries
             if block["start"] not in reachable
         ][:25],
-        "ret_thunk_blocks": ret_thunk_evidence[:25],
         "blocks": [
             {
                 "start": hex(block["start"]),
@@ -660,18 +1167,20 @@ def disassemble_executable_sections(
 
     section_results = []
     global_counts = Counter()
-    suspicious_windows = []
     cfg_totals = Counter()
     iat_addresses = collect_iat_addresses(pe)
+    pointer_size = get_pointer_size(pe.FILE_HEADER.Machine)
     global_evidence = {
         "nop_like_samples": [],
         "indirect_branch_call_samples": [],
         "conditional_jump_samples": [],
         "compare_test_samples": [],
         "segment_peb_access_samples": [],
-        "anti_disassembly_trap_samples": [],
         "rotate_samples": [],
-        "call_pop_getpc_samples": [],
+        "stack_string_xor_samples": [],
+        "memory_xor_immediate_samples": [],
+        "basic_opaque_predicate_samples": [],
+        "sink_vertex_samples": [],
     }
 
     for section in pe.sections:
@@ -691,9 +1200,11 @@ def disassemble_executable_sections(
             "conditional_jump_samples": [],
             "compare_test_samples": [],
             "segment_peb_access_samples": [],
-            "anti_disassembly_trap_samples": [],
             "rotate_samples": [],
-            "call_pop_getpc_samples": [],
+            "stack_string_xor_samples": [],
+            "memory_xor_immediate_samples": [],
+            "basic_opaque_predicate_samples": [],
+            "sink_vertex_samples": [],
         }
 
         try:
@@ -755,14 +1266,6 @@ def disassemble_executable_sections(
                         section_evidence["rotate_samples"].append(evidence)
                         global_evidence["rotate_samples"].append(evidence)
 
-                if mnemonic in {"ud2", "icebp", "hlt"}:
-                    counts["anti_disassembly_trap"] += 1
-                    global_counts["anti_disassembly_trap"] += 1
-                    if len(section_evidence["anti_disassembly_trap_samples"]) < 10:
-                        evidence = build_instruction_evidence(insn, name, note="trap / anti-disassembly instruction")
-                        section_evidence["anti_disassembly_trap_samples"].append(evidence)
-                        global_evidence["anti_disassembly_trap_samples"].append(evidence)
-
                 if mnemonic in {"jmp", "call"} and op_str and "[" not in op_str and any(
                     op_str == reg for reg in {
                         "eax", "ebx", "ecx", "edx", "esi", "edi", "ebp", "esp",
@@ -782,6 +1285,21 @@ def disassemble_executable_sections(
                     if len(ops) == 2 and ops[0] == ops[1]:
                         counts["zeroing_idiom"] += 1
                         global_counts["zeroing_idiom"] += 1
+
+                memory_xor_key = get_memory_xor_immediate_key(insn)
+                if memory_xor_key is not None:
+                    counts["memory_xor_immediate"] += 1
+                    global_counts["memory_xor_immediate"] += 1
+                    if len(section_evidence["memory_xor_immediate_samples"]) < 10:
+                        evidence = build_instruction_evidence(
+                            insn,
+                            name,
+                            note=f"memory XOR immediate key 0x{memory_xor_key:02x}",
+                        )
+                        evidence["key"] = f"0x{memory_xor_key:02x}"
+                        evidence["key_value"] = memory_xor_key
+                        section_evidence["memory_xor_immediate_samples"].append(evidence)
+                        global_evidence["memory_xor_immediate_samples"].append(evidence)
 
                 if mnemonic in {"cmp", "test"}:
                     counts["compare_test"] += 1
@@ -810,23 +1328,21 @@ def disassemble_executable_sections(
                 if len(last_instructions) >= 2:
                     prev = last_instructions[-2]
                     cur = last_instructions[-1]
-                    prev_target = get_direct_branch_target(prev)
-                    call_span = (prev_target - (prev.address + prev.size)) if prev_target is not None else None
-                    if prev.mnemonic.lower() == "call" and cur.mnemonic.lower() == "pop" and call_span is not None and abs(call_span) <= 64:
-                        counts["call_pop_getpc"] += 1
-                        global_counts["call_pop_getpc"] += 1
+                    opaque_reason = classify_basic_opaque_predicate(prev, cur)
+                    if opaque_reason:
+                        counts["basic_opaque_predicate"] += 1
+                        global_counts["basic_opaque_predicate"] += 1
                         evidence = {
                             "section": name,
                             "address": hex(prev.address),
-                            "pattern": "call followed by pop; possible GetPC / shellcode-style position discovery",
+                            "pattern": opaque_reason,
                             "instructions": [
-                                build_instruction_evidence(prev, name, note="call"),
-                                build_instruction_evidence(cur, name, note="pop"),
+                                build_instruction_evidence(prev, name, note="flag-setting instruction"),
+                                build_instruction_evidence(cur, name, note="conditional jump"),
                             ],
                         }
-                        suspicious_windows.append(evidence)
-                        section_evidence["call_pop_getpc_samples"].append(evidence)
-                        global_evidence["call_pop_getpc_samples"].append(evidence)
+                        section_evidence["basic_opaque_predicate_samples"].append(evidence)
+                        global_evidence["basic_opaque_predicate_samples"].append(evidence)
 
                 if len(instructions) < 200:
                     instructions.append({
@@ -844,6 +1360,17 @@ def disassemble_executable_sections(
             })
             continue
 
+        stack_string_xor_hits = detect_stack_string_xor_patterns(
+            disassembled,
+            section_name=name,
+            pointer_size=pointer_size,
+        )
+        counts["stack_string_xor"] += len(stack_string_xor_hits)
+        global_counts["stack_string_xor"] += len(stack_string_xor_hits)
+        if stack_string_xor_hits:
+            section_evidence["stack_string_xor_samples"] = stack_string_xor_hits[:10]
+            global_evidence["stack_string_xor_samples"].extend(stack_string_xor_hits[:10])
+
         cfg = build_cfg_for_section(
             disassembled,
             section_name=name,
@@ -851,19 +1378,18 @@ def disassemble_executable_sections(
             section_end=va + len(data),
             entry_point_va=entry_point_va if entry_point_va is not None and va <= entry_point_va < va + len(data) else None,
         )
+        if cfg.get("sink_vertices"):
+            section_evidence["sink_vertex_samples"] = cfg["sink_vertices"][:10]
+            global_evidence["sink_vertex_samples"].extend(cfg["sink_vertices"][:10])
 
         cfg_totals["block_count"] += cfg["block_count"]
         cfg_totals["edge_count"] += cfg["edge_count"]
         cfg_totals["reachable_block_count"] += cfg["reachable_block_count"]
         cfg_totals["unreachable_block_count"] += cfg["unreachable_block_count"]
-        cfg_totals["dispatcher_block_count"] += cfg["dispatcher_block_count"]
-        cfg_totals["push_ret_dispatch_count"] += cfg["push_ret_dispatch_count"]
-        cfg_totals["ret_thunk_count"] += cfg["ret_thunk_count"]
         cfg_totals["avg_block_size_sum"] += cfg["avg_block_size"] * max(cfg["block_count"], 1)
         cfg_totals["small_block_weight"] += cfg["small_block_ratio"] * cfg["block_count"]
         cfg_totals["jmp_only_block_weight"] += cfg["jmp_only_block_ratio"] * cfg["block_count"]
         cfg_totals["back_edge_weight"] += cfg["back_edge_ratio"] * max(cfg["edge_count"], 1)
-        cfg_totals["flattening_weight"] += cfg["flattening_score"] * max(cfg["block_count"], 1)
         cfg_totals["unreachable_weight"] += cfg["unreachable_block_ratio"] * cfg["block_count"]
 
         total = max(counts["total"], 1)
@@ -879,8 +1405,9 @@ def disassemble_executable_sections(
             "rotate_ratio": counts["rotate"] / total,
             "register_indirect_transfer_ratio": counts["register_indirect_transfer"] / total,
             "segment_peb_access_ratio": counts["segment_peb_access"] / total,
-            "anti_disassembly_trap_ratio": counts["anti_disassembly_trap"] / total,
-            "call_pop_getpc_count": counts["call_pop_getpc"],
+            "stack_string_xor_count": counts["stack_string_xor"],
+            "memory_xor_immediate_count": counts["memory_xor_immediate"],
+            "basic_opaque_predicate_count": counts["basic_opaque_predicate"],
         }
 
         section_results.append({
@@ -911,11 +1438,14 @@ def disassemble_executable_sections(
         "stack_op_ratio": global_counts["stack_op"] / total,
         "zeroing_idiom_ratio": global_counts["zeroing_idiom"] / total,
         "ret_ratio": global_counts["ret"] / total,
+        "rotate_count": global_counts["rotate"],
         "rotate_ratio": global_counts["rotate"] / total,
         "register_indirect_transfer_ratio": global_counts["register_indirect_transfer"] / total,
+        "segment_peb_access_count": global_counts["segment_peb_access"],
         "segment_peb_access_ratio": global_counts["segment_peb_access"] / total,
-        "anti_disassembly_trap_ratio": global_counts["anti_disassembly_trap"] / total,
-        "call_pop_getpc_count": global_counts["call_pop_getpc"],
+        "stack_string_xor_count": global_counts["stack_string_xor"],
+        "memory_xor_immediate_count": global_counts["memory_xor_immediate"],
+        "basic_opaque_predicate_count": global_counts["basic_opaque_predicate"],
         "cfg_block_count": cfg_totals["block_count"],
         "cfg_edge_count": cfg_totals["edge_count"],
         "cfg_unreachable_block_count": cfg_totals["unreachable_block_count"],
@@ -924,22 +1454,20 @@ def disassemble_executable_sections(
         "cfg_small_block_ratio": cfg_totals["small_block_weight"] / total_blocks,
         "cfg_jmp_only_block_ratio": cfg_totals["jmp_only_block_weight"] / total_blocks,
         "cfg_back_edge_ratio": cfg_totals["back_edge_weight"] / total_edges,
-        "cfg_dispatcher_block_count": cfg_totals["dispatcher_block_count"],
-        "cfg_dispatcher_hub_ratio": cfg_totals["dispatcher_block_count"] / total_blocks,
-        "cfg_flattening_score": cfg_totals["flattening_weight"] / total_blocks,
-        "push_ret_dispatch_count": cfg_totals["push_ret_dispatch_count"],
-        "ret_thunk_count": cfg_totals["ret_thunk_count"],
+        "cfg_sink_vertex_count": cfg_totals["sink_vertex_count"],
+        "cfg_sink_vertex_ratio": cfg_totals["sink_vertex_count"] / total_blocks,
         "evidence": {
             "nop_like_samples": global_evidence["nop_like_samples"][:10],
             "indirect_branch_call_samples": global_evidence["indirect_branch_call_samples"][:12],
             "conditional_jump_samples": global_evidence["conditional_jump_samples"][:12],
             "compare_test_samples": global_evidence["compare_test_samples"][:12],
             "segment_peb_access_samples": global_evidence["segment_peb_access_samples"][:10],
-            "anti_disassembly_trap_samples": global_evidence["anti_disassembly_trap_samples"][:10],
             "rotate_samples": global_evidence["rotate_samples"][:10],
-            "call_pop_getpc_samples": global_evidence["call_pop_getpc_samples"][:10],
+            "stack_string_xor_samples": global_evidence["stack_string_xor_samples"][:10],
+            "memory_xor_immediate_samples": global_evidence["memory_xor_immediate_samples"][:10],
+            "basic_opaque_predicate_samples": global_evidence["basic_opaque_predicate_samples"][:10],
+            "sink_vertex_samples": global_evidence["sink_vertex_samples"][:10],
         },
-        "suspicious_windows": suspicious_windows[:50],
     }
 
     return {
@@ -949,8 +1477,8 @@ def disassemble_executable_sections(
     }
 
 
-def analyze_pe_file(file_path: str) -> Dict[str, Any]:
-    results: Dict[str, Any] = {
+def empty_pe_analysis(error: Optional[str] = None) -> Dict[str, Any]:
+    return {
         "valid_pe": False,
         "analysis_target": "native_pe",
         "supported_for_analysis": True,
@@ -962,9 +1490,20 @@ def analyze_pe_file(file_path: str) -> Dict[str, Any]:
         "high_entropy_sections": [],
         "imports": [],
         "suspicious_imports": [],
+        "import_obfuscation": {
+            "import_count": 0,
+            "dynamic_resolution_apis": [],
+            "has_loadlibrary": False,
+            "has_getprocaddress": False,
+            "evidence": [],
+        },
         "packer_section_names": [],
-        "error": None,
+        "error": error,
     }
+
+
+def analyze_pe_file(file_path: str) -> Dict[str, Any]:
+    results = empty_pe_analysis()
 
     try:
         pe = pefile.PE(file_path, fast_load=False)
@@ -1018,6 +1557,7 @@ def analyze_pe_file(file_path: str) -> Dict[str, Any]:
         imports, suspicious = extract_imports(pe)
         results["imports"] = imports
         results["suspicious_imports"] = suspicious
+        results["import_obfuscation"] = summarize_import_obfuscation(imports)
         entry_point_va = pe.OPTIONAL_HEADER.ImageBase + pe.OPTIONAL_HEADER.AddressOfEntryPoint
         results["capstone"] = disassemble_executable_sections(pe, entry_point_va=entry_point_va)
 
@@ -1029,8 +1569,13 @@ def analyze_pe_file(file_path: str) -> Dict[str, Any]:
     return results
 
 
-def build_feature_vector(file_path: str, pe_analysis: Dict[str, Any], xor_analysis: Dict[str, Any]) -> Dict[str, Any]:
-    """Build a flat feature vector suitable for CSV export or ML inference."""
+def build_feature_vector(
+    file_path: str,
+    analysis_type: str,
+    pe_analysis: Dict[str, Any],
+    xor_analysis: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Build a flat feature vector for the active five-technique PE baseline."""
     sections = pe_analysis.get("sections", [])
     executable_sections = [s for s in sections if "EXECUTE" in s.get("characteristics", [])]
     writable_executable_sections = [
@@ -1040,9 +1585,11 @@ def build_feature_vector(file_path: str, pe_analysis: Dict[str, Any], xor_analys
     entropies = [s.get("entropy", 0.0) for s in sections]
 
     cap = pe_analysis.get("capstone", {}).get("summary", {})
+    import_obf = pe_analysis.get("import_obfuscation", {})
 
     features = {
         "file_size": os.path.getsize(file_path),
+        "analysis_type_pe": int(analysis_type == "pe"),
         "valid_pe": int(bool(pe_analysis.get("valid_pe"))),
         "section_count": len(sections),
         "executable_section_count": len(executable_sections),
@@ -1055,45 +1602,38 @@ def build_feature_vector(file_path: str, pe_analysis: Dict[str, Any], xor_analys
         "suspicious_import_count": len(pe_analysis.get("suspicious_imports", [])),
         "packer_section_name_count": len(pe_analysis.get("packer_section_names", [])),
         "xor_key_count": len(xor_analysis.get("xor_keys", [])),
+        "xor_printable_string_count": sum(hit.get("printable_string_count", 0) for hit in xor_analysis.get("hits", [])),
+        "xor_printable_character_count": sum(hit.get("printable_character_count", 0) for hit in xor_analysis.get("hits", [])),
+        "stack_string_xor_count": len(xor_analysis.get("stack_string_xor_hits", [])),
+        "memory_xor_immediate_count": cap.get("memory_xor_immediate_count", 0),
         "instruction_count": cap.get("instruction_count", 0),
-        "nop_like_ratio": cap.get("nop_like_ratio", 0.0),
-        "indirect_branch_call_ratio": cap.get("indirect_branch_call_ratio", 0.0),
-        "conditional_jump_ratio": cap.get("conditional_jump_ratio", 0.0),
-        "unconditional_jump_ratio": cap.get("unconditional_jump_ratio", 0.0),
-        "compare_test_ratio": cap.get("compare_test_ratio", 0.0),
-        "stack_op_ratio": cap.get("stack_op_ratio", 0.0),
-        "zeroing_idiom_ratio": cap.get("zeroing_idiom_ratio", 0.0),
-        "ret_ratio": cap.get("ret_ratio", 0.0),
-        "rotate_ratio": cap.get("rotate_ratio", 0.0),
-        "register_indirect_transfer_ratio": cap.get("register_indirect_transfer_ratio", 0.0),
-        "segment_peb_access_ratio": cap.get("segment_peb_access_ratio", 0.0),
-        "anti_disassembly_trap_ratio": cap.get("anti_disassembly_trap_ratio", 0.0),
-        "call_pop_getpc_count": cap.get("call_pop_getpc_count", 0),
+        "basic_opaque_predicate_count": cap.get("basic_opaque_predicate_count", 0),
         "cfg_block_count": cap.get("cfg_block_count", 0),
-        "cfg_edge_count": cap.get("cfg_edge_count", 0),
-        "cfg_unreachable_block_count": cap.get("cfg_unreachable_block_count", 0),
-        "cfg_unreachable_block_ratio": cap.get("cfg_unreachable_block_ratio", 0.0),
-        "cfg_avg_block_size": cap.get("cfg_avg_block_size", 0.0),
-        "cfg_small_block_ratio": cap.get("cfg_small_block_ratio", 0.0),
-        "cfg_jmp_only_block_ratio": cap.get("cfg_jmp_only_block_ratio", 0.0),
-        "cfg_back_edge_ratio": cap.get("cfg_back_edge_ratio", 0.0),
-        "cfg_dispatcher_block_count": cap.get("cfg_dispatcher_block_count", 0),
-        "cfg_dispatcher_hub_ratio": cap.get("cfg_dispatcher_hub_ratio", 0.0),
-        "cfg_flattening_score": cap.get("cfg_flattening_score", 0.0),
-        "push_ret_dispatch_count": cap.get("push_ret_dispatch_count", 0),
-        "ret_thunk_count": cap.get("ret_thunk_count", 0),
+        "cfg_sink_vertex_count": cap.get("cfg_sink_vertex_count", 0),
+        "cfg_sink_vertex_ratio": cap.get("cfg_sink_vertex_ratio", 0.0),
+        "dynamic_resolution_api_count": len(import_obf.get("dynamic_resolution_apis", [])),
+        "has_loadlibrary_import": int(bool(import_obf.get("has_loadlibrary"))),
+        "has_getprocaddress_import": int(bool(import_obf.get("has_getprocaddress"))),
+        "rotate_count": cap.get("rotate_count", 0),
+        "rotate_ratio": cap.get("rotate_ratio", 0.0),
+        "segment_peb_access_count": cap.get("segment_peb_access_count", 0),
+        "segment_peb_access_ratio": cap.get("segment_peb_access_ratio", 0.0),
     }
 
     return {k: round(v, 6) if isinstance(v, float) else v for k, v in features.items()}
 
 
-def score_obfuscation(pe_analysis: Dict[str, Any], xor_analysis: Dict[str, Any], features: Dict[str, Any]) -> Dict[str, Any]:
-    """Rule-based scoring with explicit technique hints."""
+def score_pe_obfuscation(
+    pe_analysis: Dict[str, Any],
+    xor_analysis: Dict[str, Any],
+    features: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Rule-based scoring limited to the Windows malware techniques in ideas3.md."""
     score = 0
     details: List[Dict[str, Any]] = []
     techniques = set()
     cap_summary = pe_analysis.get("capstone", {}).get("summary", {})
-    cap_sections = pe_analysis.get("capstone", {}).get("sections", [])
+    import_obf = pe_analysis.get("import_obfuscation", {})
 
     def add(
         points: int,
@@ -1147,37 +1687,6 @@ def score_obfuscation(pe_analysis: Dict[str, Any], xor_analysis: Dict[str, Any],
             "possible_techniques": [],
         }
 
-    if features["total_entropy"] > 7.2:
-        add(
-            25,
-            "High overall entropy",
-            features["total_entropy"],
-            "HIGH",
-            "Overall entropy above 7.2 often indicates compression, encryption, or packing.",
-            "Packing / encryption / compression",
-        )
-
-    if features["high_entropy_section_count"] > 0:
-        add(
-            20,
-            "High entropy section(s)",
-            features["high_entropy_section_count"],
-            "HIGH",
-            "One or more PE sections have unusually high entropy.",
-            "Packed or encrypted sections",
-            evidence=pe_analysis.get("high_entropy_sections", [])[:10],
-        )
-
-    if features["writable_executable_section_count"] > 0:
-        add(
-            15,
-            "Writable + executable section",
-            features["writable_executable_section_count"],
-            "HIGH",
-            "Sections marked both writable and executable can support unpacking or self-modifying code.",
-            "Self-modifying code / unpacking stub",
-        )
-
     if features["packer_section_name_count"] > 0:
         add(
             20,
@@ -1185,235 +1694,127 @@ def score_obfuscation(pe_analysis: Dict[str, Any], xor_analysis: Dict[str, Any],
             pe_analysis.get("packer_section_names", []),
             "HIGH",
             "Known packer section names were found.",
-            "Known packer artifact",
+            "PE Packing",
             evidence=[{"section": name, "reason": "matches known packer section naming"} for name in pe_analysis.get("packer_section_names", [])[:10]],
         )
 
-    if 0 < features["import_count"] < 10:
+    if features["total_entropy"] > 7.2 or features["high_entropy_section_count"] > 0:
         add(
-            10,
-            "Very few imports",
-            features["import_count"],
-            "LOW",
-            "Packed binaries often import very few APIs and resolve others dynamically.",
-            "Import hiding / dynamic API resolution",
-            evidence=pe_analysis.get("imports", [])[:10],
+            18 if features["high_entropy_section_count"] > 0 else 12,
+            "High entropy consistent with packing",
+            {
+                "total_entropy": features["total_entropy"],
+                "high_entropy_sections": features["high_entropy_section_count"],
+            },
+            "HIGH" if features["high_entropy_section_count"] > 0 else "MEDIUM",
+            "Overall or section-level entropy is high enough to be consistent with a common packer or compressed payload.",
+            "PE Packing",
+            evidence=pe_analysis.get("high_entropy_sections", [])[:10],
         )
 
-    if features["suspicious_import_count"] >= 2 or (
-        features["suspicious_import_count"] >= 1 and features["import_count"] < 20
+    if features["writable_executable_section_count"] > 0:
+        add(
+            12,
+            "Writable and executable section",
+            features["writable_executable_section_count"],
+            "MEDIUM",
+            "At least one PE section is both writable and executable, a common unpacking-stub or self-modifying-code artifact.",
+            "PE Packing",
+            evidence=[
+                section for section in pe_analysis.get("sections", [])
+                if "WRITE" in section.get("characteristics", []) and "EXECUTE" in section.get("characteristics", [])
+            ][:10],
+        )
+
+    if (
+        features["dynamic_resolution_api_count"] > 0
+        and (
+            features["has_getprocaddress_import"]
+            or features["has_loadlibrary_import"]
+            or features["import_count"] <= 10
+        )
     ):
         add(
-            15,
-            "Suspicious APIs",
-            features["suspicious_import_count"],
-            "MEDIUM",
-            "Memory allocation, memory protection, injection, or dynamic-loading APIs were imported.",
-            "Loader behavior / dynamic API resolution",
-            evidence=pe_analysis.get("suspicious_imports", [])[:15],
+            18 if features["import_count"] <= 10 else 12,
+            "Dynamic API resolution imports",
+            {
+                "imports": features["import_count"],
+                "apis": import_obf.get("dynamic_resolution_apis", []),
+            },
+            "HIGH" if features["import_count"] <= 10 else "MEDIUM",
+            "The import table contains loader/resolver APIs such as LoadLibrary or GetProcAddress, which matches runtime API resolution in the script.",
+            "Import Obfuscation",
+            evidence=import_obf.get("evidence", [])[:12],
         )
 
-    if features["xor_key_count"] > 0:
+    if features["basic_opaque_predicate_count"] > 0:
+        add(
+            18,
+            "Basic opaque predicate pattern",
+            features["basic_opaque_predicate_count"],
+            "MEDIUM",
+            "Capstone recovered compare/test-same-operand or zeroing-idiom patterns immediately followed by conditional jumps.",
+            "Dead Code Insertion",
+            evidence=cap_summary.get("evidence", {}).get("basic_opaque_predicate_samples", [])[:10],
+        )
+
+    if features["cfg_sink_vertex_count"] > 0:
+        add(
+            16 if features["cfg_sink_vertex_ratio"] >= 0.05 else 10,
+            "Sink / dead-end basic blocks",
+            {
+                "sink_vertices": features["cfg_sink_vertex_count"],
+                "sink_ratio": features["cfg_sink_vertex_ratio"],
+            },
+            "MEDIUM",
+            "Recovered CFG contains basic blocks that end without a normal exit edge, which is consistent with junk blocks or decode dead-ends.",
+            "Dead Code Insertion",
+            evidence=cap_summary.get("evidence", {}).get("sink_vertex_samples", [])[:10],
+        )
+
+    if features["xor_key_count"] > 0 or features["stack_string_xor_count"] > 0:
         add(
             20,
             "Possible XOR-encoded strings",
-            xor_analysis.get("xor_keys", [])[:10],
-            "MEDIUM",
-            "Common strings appeared after single-byte XOR decoding.",
-            "XOR string encoding",
-            evidence=xor_analysis.get("hits", [])[:10],
-        )
-
-    if features["nop_like_ratio"] > 0.06:
-        add(
-            12,
-            "High NOP/junk-like ratio",
-            features["nop_like_ratio"],
-            "MEDIUM",
-            "A high density of NOP-like instructions can indicate junk-code insertion.",
-            "Junk code insertion",
-            evidence=cap_summary.get("evidence", {}).get("nop_like_samples", [])[:10],
-        )
-
-    if features["indirect_branch_call_ratio"] > 0.04:
-        add(
-            15,
-            "High indirect branch/call density",
-            features["indirect_branch_call_ratio"],
-            "MEDIUM",
-            "Indirect transfers can make static control-flow recovery harder.",
-            "Control-flow obfuscation",
-            evidence=cap_summary.get("evidence", {}).get("indirect_branch_call_samples", [])[:12],
-        )
-
-    if features["cfg_dispatcher_block_count"] >= 3 and features["cfg_flattening_score"] > 0.35:
-        add(
-            18,
-            "Dispatcher-style CFG hub",
             {
-                "dispatcher_blocks": features["cfg_dispatcher_block_count"],
-                "flattening_score": features["cfg_flattening_score"],
-            },
-            "HIGH",
-            "Recovered basic blocks contain dispatcher-like hubs and graph structure consistent with CFG flattening.",
-            "Control-flow flattening",
-            evidence=[
-                {"section": section.get("name"), **block}
-                for section in cap_sections
-                for block in section.get("cfg", {}).get("suspicious_blocks", [])
-                if "dispatcher-like hub" in block.get("pattern", "")
-            ][:10],
-        )
-
-    if features["unconditional_jump_ratio"] > 0.08 and features["conditional_jump_ratio"] > 0.06:
-        add(
-            15,
-            "Jump-heavy executable code",
-            {
-                "jmp": features["unconditional_jump_ratio"],
-                "conditional": features["conditional_jump_ratio"],
+                "single_byte_keys": xor_analysis.get("xor_keys", [])[:10],
+                "stack_string_xor_hits": features["stack_string_xor_count"],
+                "memory_xor_immediate_instructions": features["memory_xor_immediate_count"],
             },
             "MEDIUM",
-            "Jump-heavy code may indicate dispatcher-style control-flow flattening.",
-            "Control-flow flattening",
-            evidence=(cap_summary.get("evidence", {}).get("conditional_jump_samples", [])[:6] + cap_summary.get("evidence", {}).get("indirect_branch_call_samples", [])[:6])[:12],
+            "Readable strings appeared after single-byte XOR decoding, stack-built bytes were XOR-decoded in place, or code used memory XOR with an immediate key.",
+            "String Encryption (XOR)",
+            evidence=(
+                xor_analysis.get("hits", [])[:8]
+                + xor_analysis.get("stack_string_xor_hits", [])[:8]
+                + cap_summary.get("evidence", {}).get("memory_xor_immediate_samples", [])[:8]
+            )[:12],
         )
 
-    if features["compare_test_ratio"] > 0.08 and features["conditional_jump_ratio"] > 0.08:
-        add(
-            10,
-            "Compare/test + conditional jump density",
-            {
-                "compare_test": features["compare_test_ratio"],
-                "conditional_jump": features["conditional_jump_ratio"],
-            },
-            "LOW",
-            "Dense compare/test and conditional-jump patterns may indicate opaque predicates.",
-            "Opaque predicates",
-            evidence=(cap_summary.get("evidence", {}).get("compare_test_samples", [])[:6] + cap_summary.get("evidence", {}).get("conditional_jump_samples", [])[:6])[:12],
-        )
-
-    if features["cfg_jmp_only_block_ratio"] > 0.3 and features["cfg_small_block_ratio"] > 0.45:
-        add(
-            12,
-            "JMP trampoline / block-splitting pattern",
-            {
-                "jmp_only_block_ratio": features["cfg_jmp_only_block_ratio"],
-                "small_block_ratio": features["cfg_small_block_ratio"],
-            },
-            "MEDIUM",
-            "The recovered CFG contains many tiny blocks that terminate in jumps, which is common in trampoline-based control-flow obfuscation.",
-            "Jump trampolines / basic-block splitting",
-            evidence=[
-                {"section": section.get("name"), **block}
-                for section in cap_sections
-                for block in section.get("cfg", {}).get("blocks", [])
-                if block.get("instruction_count", 0) <= 2 and block.get("terminator") == "jmp"
-            ][:10],
-        )
-
-    if features["cfg_unreachable_block_ratio"] > 0.35 and features["cfg_block_count"] >= 25:
-        add(
-            10,
-            "High unreachable CFG block ratio",
-            features["cfg_unreachable_block_ratio"],
-            "MEDIUM",
-            "A large fraction of recovered basic blocks are not reachable from the section entry, which can indicate junk code or anti-disassembly data-in-code regions.",
-            "Junk code / anti-disassembly",
-            evidence=[
-                {"section": section.get("name"), **block}
-                for section in cap_sections
-                for block in section.get("cfg", {}).get("unreachable_blocks", [])
-            ][:10],
-        )
-
-    if features["push_ret_dispatch_count"] > 0:
-        add(
-            15,
-            "Push-ret dispatch stubs",
-            features["push_ret_dispatch_count"],
-            "HIGH",
-            "Basic blocks containing push-immediate followed by ret are commonly used for RET-based dispatch or trampoline obfuscation.",
-            "RET-based control-flow obfuscation",
-            evidence=[
-                {"section": section.get("name"), **block}
-                for section in cap_sections
-                for block in section.get("cfg", {}).get("suspicious_blocks", [])
-                if "push immediate; ret dispatch stub" in block.get("pattern", "")
-            ][:10],
-        )
-
-    if features["ret_thunk_count"] > 6 and features["ret_ratio"] > 0.03:
-        add(
-            8,
-            "Many RET thunk blocks",
-            {
-                "ret_thunk_count": features["ret_thunk_count"],
-                "ret_ratio": features["ret_ratio"],
-            },
-            "LOW",
-            "An unusual number of RET-only blocks can appear in retpoline-like or RET-based dispatch patterns.",
-            "RET-based control-flow obfuscation",
-            evidence=[
-                {"section": section.get("name"), **block}
-                for section in cap_sections
-                for block in section.get("cfg", {}).get("ret_thunk_blocks", [])
-            ][:10],
-        )
-
-    if features["segment_peb_access_ratio"] > 0 and features["import_count"] < 20:
-        add(
-            12,
-            "PEB/TEB access pattern",
-            {
-                "segment_access_ratio": features["segment_peb_access_ratio"],
-                "import_count": features["import_count"],
-            },
-            "MEDIUM",
-            "FS/GS segment access with a small visible import table can indicate PEB walking or manual import resolution.",
-            "Manual API resolution / PEB walking",
-            evidence=cap_summary.get("evidence", {}).get("segment_peb_access_samples", [])[:10],
-        )
-
-    if features["rotate_ratio"] > 0.015 and features["suspicious_import_count"] == 0 and features["import_count"] < 20:
-        add(
-            8,
-            "Rotate-heavy low-import code",
-            {
-                "rotate_ratio": features["rotate_ratio"],
-                "import_count": features["import_count"],
-            },
-            "LOW",
-            "ROL/ROR-heavy code with few imports may indicate API hashing or custom decoder logic.",
-            "API hashing / custom decoder",
-            evidence=cap_summary.get("evidence", {}).get("rotate_samples", [])[:10],
-        )
-
-    if features["anti_disassembly_trap_ratio"] > 0:
-        add(
-            10,
-            "Anti-disassembly trap instructions",
-            features["anti_disassembly_trap_ratio"],
-            "MEDIUM",
-            "Instructions such as INT3 or UD2 can be used to break linear sweep disassembly or frustrate analysts.",
-            "Anti-disassembly traps",
-            evidence=cap_summary.get("evidence", {}).get("anti_disassembly_trap_samples", [])[:10],
-        )
-
-    if features["call_pop_getpc_count"] >= 3 and (
-        features["import_count"] < 20
-        or features["total_entropy"] > 6.8
-        or features["xor_key_count"] > 0
-        or features["segment_peb_access_ratio"] > 0
+    if (
+        features["rotate_count"] >= 2
+        and features["import_count"] <= 15
+        and not features["has_getprocaddress_import"]
+    ) or (
+        features["rotate_count"] >= 2
+        and features["segment_peb_access_count"] > 0
     ):
         add(
-            10,
-            "Call-pop GetPC pattern",
-            features["call_pop_getpc_count"],
-            "LOW",
-            "Call followed by pop can be used to discover the current code address.",
-            "Shellcode-style position-independent code",
-            evidence=cap_summary.get("evidence", {}).get("call_pop_getpc_samples", [])[:10],
+            18,
+            "API hashing style arithmetic",
+            {
+                "rotate_instructions": features["rotate_count"],
+                "segment_peb_access": features["segment_peb_access_count"],
+                "imports": features["import_count"],
+                "getprocaddress_imported": bool(features["has_getprocaddress_import"]),
+            },
+            "MEDIUM",
+            "Rotate-heavy code with a small import table and no visible GetProcAddress import is consistent with API-name hashing or export-table walking.",
+            "API Hashing",
+            evidence=(
+                cap_summary.get("evidence", {}).get("rotate_samples", [])[:6]
+                + cap_summary.get("evidence", {}).get("segment_peb_access_samples", [])[:6]
+            )[:12],
         )
 
     score = min(score, 100)
@@ -1436,25 +1837,39 @@ def score_obfuscation(pe_analysis: Dict[str, Any], xor_analysis: Dict[str, Any],
     }
 
 
+def score_obfuscation(
+    analysis_type: str,
+    pe_analysis: Dict[str, Any],
+    xor_analysis: Dict[str, Any],
+    features: Dict[str, Any],
+) -> Dict[str, Any]:
+    return score_pe_obfuscation(pe_analysis, xor_analysis, features)
+
+
 def analyze_binary(file_path: str) -> Dict[str, Any]:
     file_path_obj = Path(file_path)
-    raw_data = file_path_obj.read_bytes()
-
+    analysis_type = detect_binary_format(file_path)
     pe_analysis = analyze_pe_file(file_path)
-    xor_analysis = detect_xor_strings(file_path)
-    content_indicators = {
-        "base64_sequences": detect_base64_sequences(raw_data),
-        "padding": detect_padding_sequences(raw_data),
-    }
-    features = build_feature_vector(file_path, pe_analysis, xor_analysis)
-    obfuscation = score_obfuscation(pe_analysis, xor_analysis, features)
+    xor_analysis = detect_xor_strings(file_path, pe_analysis=pe_analysis)
+    features = build_feature_vector(
+        file_path,
+        analysis_type,
+        pe_analysis,
+        xor_analysis,
+    )
+    obfuscation = score_obfuscation(
+        analysis_type,
+        pe_analysis,
+        xor_analysis,
+        features,
+    )
 
     return {
         "filename": file_path_obj.name,
         "file_size": os.path.getsize(file_path),
+        "analysis_type": analysis_type,
         "pe_analysis": pe_analysis,
         "xor_analysis": xor_analysis,
-        "content_indicators": content_indicators,
         "features": features,
         "obfuscation": obfuscation,
     }

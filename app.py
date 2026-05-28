@@ -33,7 +33,7 @@ app.config["MAX_CONTENT_LENGTH"] = MAX_FILE_SIZE
 
 
 def allowed_file(filename: str) -> bool:
-    """Allow PE-like samples and raw binaries."""
+    """Allow supported PE-like samples and raw binaries."""
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
 

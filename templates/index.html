@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>PE Obfuscation Heuristic Analyzer</title>
+  <title>ObfusHunter</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link
     href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
@@ -57,6 +57,27 @@
       overflow: auto;
     }
     .badge-soft { background: #eef2ff; color: #3730a3; }
+    .evidence-card {
+      border-left: 4px solid #2563eb;
+      border-radius: 12px;
+      background: #f8fafc;
+      padding: 10px 12px;
+      margin-bottom: 10px;
+      list-style: none;
+    }
+    .evidence-title {
+      font-weight: 700;
+      font-size: 0.92rem;
+      line-height: 1.25;
+    }
+    .evidence-meta {
+      color: #6b7280;
+      font-size: 0.8rem;
+    }
+    .evidence-list {
+      padding-left: 0;
+      margin-bottom: 0;
+    }
   </style>
 </head>
 <body>
@@ -64,10 +85,12 @@
   <div class="row mt-4 g-4">
     <div class="col-lg-5">
       <div class="card p-4">
-        <h2 class="h4">Upload a native PE sample</h2>
+        <h2 class="h4">Upload a PE sample</h2>
         <p class="text-muted">
-          This tool scores native PE obfuscation heuristics only. It is not a malware verdict engine.
-          .NET/MSIL binaries are intentionally unsupported here and should go to a separate analyzer.
+          This build focuses only on the Windows malware obfuscation techniques from the presentation script:
+          XOR string encryption, dynamic API resolution, PE packing, dead code insertion, and API hashing.
+          It is not a malware verdict engine. `.NET/MSIL` binaries are still intentionally unsupported here
+          and should go to a separate analyzer.
           Supported extensions:
           <span class="mono">exe, dll, sys, scr, com, bin</span>.
         </p>
@@ -88,7 +111,7 @@
 
       <div class="card p-4 mt-4 d-none" id="downloadCard">
         <h3 class="h5">Export</h3>
-        <p class="text-muted mb-2">Download the full report or the ML-ready feature vector.</p>
+        <p class="text-muted mb-2">Download the full report or the numeric feature vector.</p>
         <div class="d-flex gap-2">
           <a class="btn btn-outline-secondary btn-sm" id="jsonLink">JSON report</a>
           <a class="btn btn-outline-secondary btn-sm" id="csvLink">Feature CSV</a>
@@ -135,25 +158,17 @@
       </div>
 
       <div class="card p-4 mt-4 d-none" id="sectionsCard">
-        <h3 class="h5">PE Sections</h3>
+        <h3 class="h5" id="sectionsTitle">Binary Layout</h3>
         <div class="table-responsive">
           <table class="table table-sm align-middle">
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Entropy</th>
-                <th>Raw Size</th>
-                <th>ASCII Ratio</th>
-                <th>Flags</th>
-              </tr>
-            </thead>
+            <thead id="sectionsHead"></thead>
             <tbody id="sectionsBody"></tbody>
           </table>
         </div>
       </div>
 
       <div class="card p-4 mt-4 d-none" id="capstoneCard">
-        <h3 class="h5">Capstone Static Disassembly Summary</h3>
+        <h3 class="h5">PE Baseline Summary</h3>
         <div id="capstoneSummary"></div>
       </div>
 
@@ -211,6 +226,18 @@ function renderInstructionLine(item) {
   return `<span class="mono">${escapeHtml(left)} ${escapeHtml(asm)}${escapeHtml(bytes)}${escapeHtml(note)}</span>`;
 }
 
+function formatValue(value) {
+  if (Array.isArray(value)) {
+    return value.map((item) => formatValue(item)).join(", ");
+  }
+  if (value && typeof value === "object") {
+    return Object.entries(value)
+      .map(([key, nested]) => `${key}: ${formatValue(nested)}`)
+      .join(", ");
+  }
+  return String(value ?? "");
+}
+
 function renderEvidenceItem(item) {
   if (item && item.mnemonic && item.address) {
     return `<li>${renderInstructionLine(item)}</li>`;
@@ -220,8 +247,19 @@ function renderEvidenceItem(item) {
     return `<li><span class="mono">${escapeHtml(item.dll)}!${escapeHtml(item.api)}</span></li>`;
   }
 
-  if (item && item.key && item.targets) {
-    return `<li><span class="mono">${escapeHtml(item.key)}</span> → ${escapeHtml(item.targets.join(", "))}</li>`;
+  if (item && item.key && item.examples) {
+    const examples = item.examples
+      .map((example) => {
+        const meta = [
+          example.region ? `region ${example.region}` : "",
+          example.reason || "",
+          example.text_score !== undefined ? `score ${example.text_score}` : "",
+        ].filter(Boolean).join(" • ");
+        return `<div><span class="mono">${escapeHtml(example.offset)}</span> ${escapeHtml(example.decoded)}${meta ? ` <span class="text-muted">(${escapeHtml(meta)})</span>` : ""}</div>`;
+      })
+      .join("");
+    const hint = item.instruction_key_hint ? ` <span class="badge bg-info text-dark">seen in XOR instruction</span>` : "";
+    return `<li><span class="mono">${escapeHtml(item.key)}</span>${hint} decoded strings=${escapeHtml(item.printable_string_count)}<div class="small mt-1">${examples}</div></li>`;
   }
 
   if (item && item.section && item.entropy !== undefined) {
@@ -247,7 +285,7 @@ function renderEvidenceItem(item) {
 
   if (item && typeof item === "object") {
     const fields = Object.entries(item)
-      .map(([key, value]) => `${escapeHtml(key)}=${escapeHtml(Array.isArray(value) ? value.join(", ") : value)}`)
+      .map(([key, value]) => `${escapeHtml(key)}=${escapeHtml(formatValue(value))}`)
       .join(" | ");
     return `<li><span class="mono">${fields}</span></li>`;
   }
@@ -263,7 +301,7 @@ function renderEvidenceList(evidence) {
   return `
     <details class="mt-2">
       <summary class="small">Evidence (${evidence.length})</summary>
-      <ul class="small mb-0 mt-2">
+      <ul class="small evidence-list mt-2">
         ${evidence.map((item) => renderEvidenceItem(item)).join("")}
       </ul>
     </details>
@@ -272,21 +310,22 @@ function renderEvidenceList(evidence) {
 
 function renderSignals(data) {
   const pe = data.pe_analysis || {};
-  const content = data.content_indicators || {};
   const xor = data.xor_analysis || {};
   const signalGrid = document.getElementById("signalGrid");
   signalGrid.innerHTML = "";
 
   const cards = [
     ["Total entropy", pe.total_entropy ?? "n/a"],
-    ["Imports", (pe.imports || []).length],
-    ["Suspicious imports", (pe.suspicious_imports || []).length],
+    ["High-entropy sections", (pe.high_entropy_sections || []).length],
+    ["Packer section names", (pe.packer_section_names || []).length],
+    ["Dynamic API imports", (pe.import_obfuscation?.dynamic_resolution_apis || []).length],
+    ["Basic opaque predicates", pe.capstone?.summary?.basic_opaque_predicate_count ?? 0],
+    ["Sink vertices", pe.capstone?.summary?.cfg_sink_vertex_count ?? 0],
     ["XOR keys", (xor.xor_keys || []).length],
-    ["CFG blocks", pe.capstone?.summary?.cfg_block_count ?? 0],
-    ["Flattening score", pe.capstone?.summary?.cfg_flattening_score ?? 0],
-    ["Base64-like strings", content.base64_sequences?.count ?? 0],
-    ["Unreachable CFG blocks", pe.capstone?.summary?.cfg_unreachable_block_count ?? 0],
-    ["Large null padding", content.padding?.has_large_null_padding ? "yes" : "no"],
+    ["Memory XOR ops", pe.capstone?.summary?.memory_xor_immediate_count ?? 0],
+    ["Stack XOR strings", (xor.stack_string_xor_hits || []).length],
+    ["API hash rotate ops", pe.capstone?.summary?.rotate_count ?? 0],
+    ["W+X sections", (pe.sections || []).filter((section) => (section.characteristics || []).includes("WRITE") && (section.characteristics || []).includes("EXECUTE")).length],
   ];
 
   cards.forEach(([label, value]) => {
@@ -302,23 +341,53 @@ function renderSignals(data) {
   });
 }
 
+function renderLayout(data) {
+  const pe = data.pe_analysis || {};
+  const sectionsTitle = document.getElementById("sectionsTitle");
+  const sectionsHead = document.getElementById("sectionsHead");
+  const sectionsBody = document.getElementById("sectionsBody");
+
+  sectionsBody.innerHTML = "";
+
+  sectionsTitle.textContent = "PE Sections";
+  sectionsHead.innerHTML = `
+    <tr>
+      <th>Name</th>
+      <th>Entropy</th>
+      <th>Raw Size</th>
+      <th>ASCII Ratio</th>
+      <th>Flags</th>
+    </tr>
+  `;
+
+  (pe.sections || []).forEach((section) => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td class="mono">${escapeHtml(section.name)}</td>
+      <td>${escapeHtml(section.entropy)}</td>
+      <td>${humanBytes(section.raw_size)}</td>
+      <td>${escapeHtml(section.printable_ascii_ratio)}</td>
+      <td>${(section.characteristics || []).map((flag) => `<span class="badge bg-secondary me-1">${escapeHtml(flag)}</span>`).join("")}</td>
+    `;
+    sectionsBody.appendChild(tr);
+  });
+}
+
 function renderResult(data) {
   showCard("summaryCard");
   showCard("signalsCard");
   showCard("detailsCard");
   showCard("sectionsCard");
-  showCard("capstoneCard");
   showCard("rawCard");
 
   const score = data.obfuscation?.score || 0;
   const pe = data.pe_analysis || {};
+  const xor = data.xor_analysis || {};
   document.getElementById("scoreRing").style.setProperty("--score", `${score}%`);
   document.getElementById("scoreText").textContent = score;
   document.getElementById("statusText").textContent = data.obfuscation?.status || "Unknown";
-  document.getElementById("filenameText").textContent =
-    `${data.original_filename || data.filename} • ${pe.architecture || "unknown architecture"}`;
-  document.getElementById("metaText").textContent =
-    `${humanBytes(data.file_size)} • entry point ${pe.entry_point || "n/a"} • image base ${pe.image_base || "n/a"}`;
+  document.getElementById("filenameText").textContent = `${data.original_filename || data.filename} • ${pe.architecture || "unknown architecture"}`;
+  document.getElementById("metaText").textContent = `${humanBytes(data.file_size)} • entry point ${pe.entry_point || "n/a"} • image base ${pe.image_base || "n/a"}`;
 
   const techniqueBox = document.getElementById("techniques");
   techniqueBox.innerHTML = "";
@@ -330,6 +399,7 @@ function renderResult(data) {
   });
 
   renderSignals(data);
+  renderLayout(data);
 
   const detailsBody = document.getElementById("detailsBody");
   detailsBody.innerHTML = "";
@@ -351,62 +421,70 @@ function renderResult(data) {
     detailsBody.appendChild(tr);
   });
 
-  const sectionsBody = document.getElementById("sectionsBody");
-  sectionsBody.innerHTML = "";
-  (pe.sections || []).forEach((section) => {
-    const tr = document.createElement("tr");
-    tr.innerHTML = `
-      <td class="mono">${section.name}</td>
-      <td>${section.entropy}</td>
-      <td>${humanBytes(section.raw_size)}</td>
-      <td>${section.printable_ascii_ratio}</td>
-      <td>${(section.characteristics || []).map((flag) => `<span class="badge bg-secondary me-1">${flag}</span>`).join("")}</td>
-    `;
-    sectionsBody.appendChild(tr);
-  });
-
+  showCard("capstoneCard");
   const cap = pe.capstone || {};
   const capSummary = cap.summary || {};
   if (cap.supported === false) {
     document.getElementById("capstoneSummary").textContent = cap.reason || "Capstone summary unavailable.";
   } else {
-    const suspicious = (capSummary.suspicious_windows || [])
+    const opaqueSamples = (capSummary.evidence?.basic_opaque_predicate_samples || [])
       .slice(0, 5)
-      .map((window) => `
+      .map((item) => `
         <li>
-          <div class="mono">${escapeHtml(window.address)} • ${escapeHtml(window.section)} • ${escapeHtml(window.pattern)}</div>
-          ${(window.instructions || []).map((insn) => `<div class="small">${renderInstructionLine(insn)}</div>`).join("")}
+          <div class="mono">${escapeHtml(item.address)} • ${escapeHtml(item.section)} • ${escapeHtml(item.pattern)}</div>
+          ${(item.instructions || []).map((insn) => `<div class="small">${renderInstructionLine(insn)}</div>`).join("")}
         </li>
       `)
       .join("");
-    const cfgSuspicious = (pe.capstone?.sections || [])
-      .flatMap((section) => (section.cfg?.suspicious_blocks || []).map((block) => ({ section: section.name, ...block })))
+    const sinkSamples = (capSummary.evidence?.sink_vertex_samples || [])
       .slice(0, 5)
-      .map((block) => `
+      .map((item) => `
         <li>
-          <div class="mono">${escapeHtml(block.section)} • ${escapeHtml(block.block)} • ${escapeHtml(block.pattern)}</div>
-          ${(block.instructions || []).map((insn) => `<div class="small">${renderInstructionLine(insn)}</div>`).join("")}
+          <div class="mono">${escapeHtml(item.block)} • ${escapeHtml(item.pattern)}</div>
+          ${(item.instructions || []).map((insn) => `<div class="small">${renderInstructionLine(insn)}</div>`).join("")}
         </li>
       `)
+      .join("");
+    const xorSamples = (xor.stack_string_xor_hits || [])
+      .slice(0, 5)
+      .map((item) => `
+        <li>
+          <div class="mono">${escapeHtml(item.section || "")} • ${escapeHtml(item.block)} • ${escapeHtml(item.pattern)}</div>
+          ${(item.instructions || []).map((insn) => `<div class="small">${renderInstructionLine(insn)}</div>`).join("")}
+        </li>
+      `)
+      .join("");
+    const xorScanRegions = (xor.scan_regions || [])
+      .slice(0, 8)
+      .map((region) => `<li><span class="mono">${escapeHtml(region.name || "")}</span> offset ${escapeHtml(region.offset || "")} size ${humanBytes(region.size || 0)}</li>`)
+      .join("");
+    const memoryXorSamples = (capSummary.evidence?.memory_xor_immediate_samples || [])
+      .slice(0, 5)
+      .map((insn) => `<li>${renderInstructionLine(insn)} <span class="text-muted">${escapeHtml(insn.key || "")}</span></li>`)
+      .join("");
+    const apiHashSamples = (capSummary.evidence?.rotate_samples || [])
+      .slice(0, 5)
+      .map((insn) => `<li>${renderInstructionLine(insn)}</li>`)
       .join("");
     document.getElementById("capstoneSummary").innerHTML = `
       <div class="row g-2">
-        <div class="col-md-4"><strong>Instructions:</strong> ${capSummary.instruction_count || 0}</div>
-        <div class="col-md-4"><strong>CFG blocks:</strong> ${capSummary.cfg_block_count || 0}</div>
-        <div class="col-md-4"><strong>CFG edges:</strong> ${capSummary.cfg_edge_count || 0}</div>
-        <div class="col-md-4"><strong>NOP-like ratio:</strong> ${capSummary.nop_like_ratio || 0}</div>
-        <div class="col-md-4"><strong>Indirect call/jmp ratio:</strong> ${capSummary.indirect_branch_call_ratio || 0}</div>
-        <div class="col-md-4"><strong>Conditional jump ratio:</strong> ${capSummary.conditional_jump_ratio || 0}</div>
-        <div class="col-md-4"><strong>Unconditional jump ratio:</strong> ${capSummary.unconditional_jump_ratio || 0}</div>
-        <div class="col-md-4"><strong>Flattening score:</strong> ${capSummary.cfg_flattening_score || 0}</div>
-        <div class="col-md-4"><strong>Dispatcher blocks:</strong> ${capSummary.cfg_dispatcher_block_count || 0}</div>
-        <div class="col-md-4"><strong>Unreachable blocks:</strong> ${capSummary.cfg_unreachable_block_count || 0}</div>
-        <div class="col-md-4"><strong>JMP-only block ratio:</strong> ${capSummary.cfg_jmp_only_block_ratio || 0}</div>
-        <div class="col-md-4"><strong>Push-ret stubs:</strong> ${capSummary.push_ret_dispatch_count || 0}</div>
-        <div class="col-md-4"><strong>Call-pop GetPC:</strong> ${capSummary.call_pop_getpc_count || 0}</div>
+        <div class="col-md-4"><strong>XOR printable keys:</strong> ${(xor.xor_keys || []).length}</div>
+        <div class="col-md-4"><strong>Dynamic API imports:</strong> ${(pe.import_obfuscation?.dynamic_resolution_apis || []).length}</div>
+        <div class="col-md-4"><strong>Packer section names:</strong> ${(pe.packer_section_names || []).length}</div>
+        <div class="col-md-4"><strong>High-entropy sections:</strong> ${(pe.high_entropy_sections || []).length}</div>
+        <div class="col-md-4"><strong>Basic opaque predicates:</strong> ${capSummary.basic_opaque_predicate_count || 0}</div>
+        <div class="col-md-4"><strong>Sink vertices:</strong> ${capSummary.cfg_sink_vertex_count || 0}</div>
+        <div class="col-md-4"><strong>Memory XOR ops:</strong> ${capSummary.memory_xor_immediate_count || 0}</div>
+        <div class="col-md-4"><strong>Stack XOR strings:</strong> ${(xor.stack_string_xor_hits || []).length}</div>
+        <div class="col-md-4"><strong>API hash rotate ops:</strong> ${capSummary.rotate_count || 0}</div>
+        <div class="col-md-4"><strong>PEB/TEB access:</strong> ${capSummary.segment_peb_access_count || 0}</div>
       </div>
-      ${cfgSuspicious ? `<hr><div class="small text-muted mb-2">Suspicious CFG blocks</div><ul class="mb-0">${cfgSuspicious}</ul>` : ""}
-      ${suspicious ? `<hr><div class="small text-muted mb-2">Suspicious instruction windows</div><ul class="mb-0">${suspicious}</ul>` : ""}
+      ${xorScanRegions ? `<hr><div class="small text-muted mb-2">XOR scan regions</div><ul class="mb-0">${xorScanRegions}</ul>` : ""}
+      ${opaqueSamples ? `<hr><div class="small text-muted mb-2">Dead code / opaque predicate samples</div><ul class="mb-0">${opaqueSamples}</ul>` : ""}
+      ${sinkSamples ? `<hr><div class="small text-muted mb-2">Sink / dead-end block samples</div><ul class="mb-0">${sinkSamples}</ul>` : ""}
+      ${memoryXorSamples ? `<hr><div class="small text-muted mb-2">Memory XOR immediate samples</div><ul class="mb-0">${memoryXorSamples}</ul>` : ""}
+      ${xorSamples ? `<hr><div class="small text-muted mb-2">Stack XOR string samples</div><ul class="mb-0">${xorSamples}</ul>` : ""}
+      ${apiHashSamples ? `<hr><div class="small text-muted mb-2">API hashing arithmetic samples</div><ul class="mb-0">${apiHashSamples}</ul>` : ""}
     `;
   }
 
@@ -431,7 +509,7 @@ form.addEventListener("submit", async (event) => {
   body.append("file", fileInput.files[0]);
 
   analyzeBtn.disabled = true;
-  statusBox.textContent = "Analyzing static features and disassembling executable sections...";
+  statusBox.textContent = "Analyzing Windows PE obfuscation heuristics...";
 
   try {
     const response = await fetch("/api/analyze", { method: "POST", body });

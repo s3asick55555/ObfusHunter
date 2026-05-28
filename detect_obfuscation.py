@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Legacy CLI entry point backed by the unified analysis engine."""
+"""Quick Windows PE analysis CLI backed by the presentation-scope engine."""
 
 from __future__ import annotations
 
@@ -37,7 +37,13 @@ def analyze_file(file_path: str) -> None:
             print(f"[!] ALERT: High entropy section {section['section']} ({section['entropy']})")
 
     if result["xor_analysis"].get("xor_keys"):
-        print(f"[!] ALERT: Possible XOR keys: {', '.join(result['xor_analysis']['xor_keys'][:5])}")
+        print(f"[!] ALERT: XOR keys that decode printable strings: {', '.join(result['xor_analysis']['xor_keys'][:5])}")
+    if result["xor_analysis"].get("stack_string_xor_hits"):
+        print(f"[!] ALERT: Stack-based XOR string patterns: {len(result['xor_analysis']['stack_string_xor_hits'])}")
+
+    import_obf = pe.get("import_obfuscation", {})
+    if import_obf.get("dynamic_resolution_apis"):
+        print(f"[!] ALERT: Dynamic API resolution imports: {', '.join(import_obf['dynamic_resolution_apis'])}")
 
 
 if __name__ == "__main__":
