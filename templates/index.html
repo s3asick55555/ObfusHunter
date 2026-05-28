@@ -1,552 +1,161 @@
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="utf-8">
-  <title>ObfusHunter</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <link
-    href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
-    rel="stylesheet">
-  <style>
-    body { background: #f6f7fb; color: #111827; }
-    .hero {
-      background: linear-gradient(135deg, #111827, #374151);
-      color: white;
-      border-radius: 24px;
-      padding: 32px;
-      margin-top: 24px;
-    }
-    .card { border: 0; border-radius: 18px; box-shadow: 0 8px 28px rgba(0,0,0,.06); }
-    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-    .score-ring {
-      width: 120px;
-      height: 120px;
-      border-radius: 50%;
-      display: grid;
-      place-items: center;
-      font-size: 28px;
-      font-weight: 800;
-      background: conic-gradient(#0d6efd var(--score), #e5e7eb 0);
-    }
-    .score-inner {
-      width: 92px;
-      height: 92px;
-      border-radius: 50%;
-      background: white;
-      display: grid;
-      place-items: center;
-    }
-    .dropzone {
-      border: 2px dashed #93c5fd;
-      background: #eff6ff;
-      border-radius: 16px;
-      padding: 24px;
-      text-align: center;
-      transition: .2s ease;
-    }
-    .dropzone.dragover {
-      border-color: #2563eb;
-      background: #dbeafe;
-    }
-    pre {
-      background: #111827;
-      color: #e5e7eb;
-      border-radius: 12px;
-      padding: 16px;
-      max-height: 420px;
-      overflow: auto;
-    }
-    .badge-soft { background: #eef2ff; color: #3730a3; }
-    .evidence-card {
-      border-left: 4px solid #2563eb;
-      border-radius: 12px;
-      background: #f8fafc;
-      padding: 10px 12px;
-      margin-bottom: 10px;
-      list-style: none;
-    }
-    .evidence-title {
-      font-weight: 700;
-      font-size: 0.92rem;
-      line-height: 1.25;
-    }
-    .evidence-meta {
-      color: #6b7280;
-      font-size: 0.8rem;
-    }
-    .evidence-list {
-      padding-left: 0;
-      margin-bottom: 0;
-    }
-  </style>
-</head>
-<body>
-<div class="container pb-5">
-  <div class="row mt-4 g-4">
-    <div class="col-lg-5">
-      <div class="card p-4">
-        <h2 class="h4">Upload a PE sample</h2>
-        <p class="text-muted">
-          This build focuses only on the Windows malware obfuscation techniques from the presentation script:
-          XOR string encryption, dynamic API resolution, PE packing, dead code insertion, and API hashing.
-          It is not a malware verdict engine. `.NET/MSIL` binaries are still intentionally unsupported here
-          and should go to a separate analyzer.
-          Supported extensions:
-          <span class="mono">exe, dll, sys, scr, com, bin</span>.
-        </p>
+	<head>
+		<meta charset="utf-8" />
+		<title>ObfusHunter</title>
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<link rel="preconnect" href="https://fonts.googleapis.com" />
+		<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+		<link
+			href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Space+Grotesk:wght@400;600;700&display=swap"
+			rel="stylesheet"
+		/>
+		<link rel="stylesheet" href="/static/css/app.css" />
+	</head>
+	<body>
+		<div class="ambient"></div>
+		<main class="page">
+			<header class="hero">
+				<div>
+					<p class="eyebrow">Windows Malware Obfuscation Studio</p>
+					<h1>ObfusHunter</h1>
+					<p class="lead">
+						Static detection toolkit for five Windows malware
+						obfuscation techniques. Built for fast triage and
+						classroom analysis.
+					</p>
+				</div>
+				<div class="hero-card">
+					<div class="hero-card__title">Scope</div>
+					<ul>
+						<li>String Encryption (XOR)</li>
+						<li>Import Obfuscation</li>
+						<li>PE Packing</li>
+						<li>Dead Code Insertion</li>
+						<li>API Hashing</li>
+					</ul>
+				</div>
+			</header>
 
-        <form id="uploadForm">
-          <div id="dropzone" class="dropzone mb-3">
-            <div class="fw-semibold mb-2">Drag and drop a sample here</div>
-            <div class="text-muted small mb-3">or choose a file manually</div>
-            <input class="form-control" type="file" id="fileInput" name="file" required>
-          </div>
-          <button class="btn btn-primary w-100" type="submit" id="analyzeBtn">
-            Analyze
-          </button>
-        </form>
+			<section class="grid">
+				<div class="panel">
+					<h2>Upload Sample</h2>
+					<p class="muted">
+						Submit a Windows PE sample to scan for obfuscation
+						signals. The analyzer does not execute code.
+					</p>
+					<form id="uploadForm">
+						<label class="dropzone" id="dropzone">
+							<span class="dropzone__title"
+								>Drop a file here</span
+							>
+							<span class="dropzone__subtitle"
+								>or click to browse</span
+							>
+							<input
+								type="file"
+								id="fileInput"
+								name="file"
+								required
+							/>
+						</label>
+						<button class="primary" type="submit" id="analyzeBtn">
+							Analyze
+						</button>
+					</form>
+					<div class="status" id="status"></div>
 
-        <div id="status" class="mt-3 small text-muted"></div>
-      </div>
+					<div class="export-card" id="exportCard">
+						<div>
+							<h3>Export</h3>
+							<p class="muted">
+								Download the report for your documentation.
+							</p>
+						</div>
+						<a class="ghost" id="jsonLink" href="#"
+							>Download JSON</a
+						>
+					</div>
 
-      <div class="card p-4 mt-4 d-none" id="downloadCard">
-        <h3 class="h5">Export</h3>
-        <p class="text-muted mb-2">Download the full report or the numeric feature vector.</p>
-        <div class="d-flex gap-2">
-          <a class="btn btn-outline-secondary btn-sm" id="jsonLink">JSON report</a>
-          <a class="btn btn-outline-secondary btn-sm" id="csvLink">Feature CSV</a>
-        </div>
-      </div>
-    </div>
+					<div class="hint-card">
+						<div class="hint-title">Tips</div>
+						<ul>
+							<li>
+								Supported extensions: exe, dll, sys, scr, com,
+								bin.
+							</li>
+							<li>
+								.NET/MSIL assemblies are out of scope for this
+								build.
+							</li>
+							<li>
+								Large packed files may take longer to analyze.
+							</li>
+						</ul>
+					</div>
+				</div>
 
-    <div class="col-lg-7">
-      <div class="card p-4 d-none" id="summaryCard">
-        <div class="d-flex align-items-center gap-4">
-          <div class="score-ring" id="scoreRing" style="--score:0%">
-            <div class="score-inner"><span id="scoreText">0</span></div>
-          </div>
-          <div>
-            <h2 class="h4 mb-1" id="statusText"></h2>
-            <div id="filenameText" class="text-muted"></div>
-            <div id="metaText" class="small text-muted mt-1"></div>
-            <div id="techniques" class="mt-2"></div>
-          </div>
-        </div>
-      </div>
+				<div class="panel">
+					<div class="summary" id="summaryCard">
+						<div class="score">
+							<div class="score-ring" id="scoreRing">
+								<span id="scoreText">0</span>
+							</div>
+							<div>
+								<p class="muted">Obfuscation Score</p>
+								<h2 id="statusText">Awaiting sample</h2>
+								<p class="mono" id="fileMeta">No file loaded</p>
+							</div>
+						</div>
+						<div class="techniques" id="techniqueBadges"></div>
+					</div>
 
-      <div class="card p-4 mt-4 d-none" id="signalsCard">
-        <h3 class="h5">Static Signals</h3>
-        <div class="row g-3" id="signalGrid"></div>
-      </div>
+					<div class="cards" id="signalsGrid"></div>
 
-      <div class="card p-4 mt-4 d-none" id="detailsCard">
-        <h3 class="h5">Indicators</h3>
-        <div class="table-responsive">
-          <table class="table table-sm align-middle">
-            <thead>
-              <tr>
-                <th>Severity</th>
-                <th>Indicator</th>
-                <th>Technique</th>
-                <th>Reason</th>
-                <th>Points</th>
-              </tr>
-            </thead>
-            <tbody id="detailsBody"></tbody>
-          </table>
-        </div>
-      </div>
+					<section class="panel-block" id="indicatorBlock">
+						<h3>Indicators</h3>
+						<div class="table-wrap">
+							<table>
+								<thead>
+									<tr>
+										<th>Severity</th>
+										<th>Indicator</th>
+										<th>Technique</th>
+										<th>Reason</th>
+										<th>Points</th>
+									</tr>
+								</thead>
+								<tbody id="indicatorTable"></tbody>
+							</table>
+						</div>
+					</section>
 
-      <div class="card p-4 mt-4 d-none" id="sectionsCard">
-        <h3 class="h5" id="sectionsTitle">Binary Layout</h3>
-        <div class="table-responsive">
-          <table class="table table-sm align-middle">
-            <thead id="sectionsHead"></thead>
-            <tbody id="sectionsBody"></tbody>
-          </table>
-        </div>
-      </div>
+					<section class="panel-block" id="sectionBlock">
+						<h3>PE Sections</h3>
+						<div class="table-wrap">
+							<table>
+								<thead>
+									<tr>
+										<th>Name</th>
+										<th>Entropy</th>
+										<th>Raw Size</th>
+										<th>ASCII</th>
+										<th>Flags</th>
+									</tr>
+								</thead>
+								<tbody id="sectionsTable"></tbody>
+							</table>
+						</div>
+					</section>
 
-      <div class="card p-4 mt-4 d-none" id="capstoneCard">
-        <h3 class="h5">PE Baseline Summary</h3>
-        <div id="capstoneSummary"></div>
-      </div>
+					<section class="panel-block" id="rawBlock">
+						<h3>Raw Report</h3>
+						<pre id="rawJson"></pre>
+					</section>
+				</div>
+			</section>
+		</main>
 
-      <div class="card p-4 mt-4 d-none" id="rawCard">
-        <h3 class="h5">Raw JSON</h3>
-        <pre id="rawJson"></pre>
-      </div>
-    </div>
-  </div>
-</div>
-
-<script>
-const form = document.getElementById("uploadForm");
-const dropzone = document.getElementById("dropzone");
-const fileInput = document.getElementById("fileInput");
-const statusBox = document.getElementById("status");
-const analyzeBtn = document.getElementById("analyzeBtn");
-
-function badgeClass(sev) {
-  if (sev === "HIGH") return "bg-danger";
-  if (sev === "MEDIUM") return "bg-warning text-dark";
-  if (sev === "LOW") return "bg-info text-dark";
-  return "bg-secondary";
-}
-
-function humanBytes(bytes) {
-  const units = ["B", "KB", "MB", "GB"];
-  let value = Number(bytes || 0);
-  let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit += 1;
-  }
-  return `${value.toFixed(2)} ${units[unit]}`;
-}
-
-function showCard(id, visible = true) {
-  document.getElementById(id).classList.toggle("d-none", !visible);
-}
-
-function escapeHtml(value) {
-  return String(value ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
-}
-
-function renderInstructionLine(item) {
-  const left = [item.section, item.address].filter(Boolean).join(" ");
-  const asm = [item.mnemonic, item.op_str].filter(Boolean).join(" ");
-  const bytes = item.bytes ? ` | ${item.bytes}` : "";
-  const note = item.note ? ` | ${item.note}` : "";
-  return `<span class="mono">${escapeHtml(left)} ${escapeHtml(asm)}${escapeHtml(bytes)}${escapeHtml(note)}</span>`;
-}
-
-function formatValue(value) {
-  if (Array.isArray(value)) {
-    return value.map((item) => formatValue(item)).join(", ");
-  }
-  if (value && typeof value === "object") {
-    return Object.entries(value)
-      .map(([key, nested]) => `${key}: ${formatValue(nested)}`)
-      .join(", ");
-  }
-  return String(value ?? "");
-}
-
-function renderEvidenceItem(item) {
-  if (item && item.mnemonic && item.address) {
-    return `<li>${renderInstructionLine(item)}</li>`;
-  }
-
-  if (item && item.dll && item.api) {
-    return `<li><span class="mono">${escapeHtml(item.dll)}!${escapeHtml(item.api)}</span></li>`;
-  }
-
-  if (item && item.key && item.examples) {
-    const examples = item.examples
-      .map((example) => {
-        const meta = [
-          example.region ? `region ${example.region}` : "",
-          example.reason || "",
-          example.text_score !== undefined ? `score ${example.text_score}` : "",
-        ].filter(Boolean).join(" • ");
-        return `<div><span class="mono">${escapeHtml(example.offset)}</span> ${escapeHtml(example.decoded)}${meta ? ` <span class="text-muted">(${escapeHtml(meta)})</span>` : ""}</div>`;
-      })
-      .join("");
-    const hint = item.instruction_key_hint ? ` <span class="badge bg-info text-dark">seen in XOR instruction</span>` : "";
-    return `<li><span class="mono">${escapeHtml(item.key)}</span>${hint} decoded strings=${escapeHtml(item.printable_string_count)}<div class="small mt-1">${examples}</div></li>`;
-  }
-
-  if (item && item.section && item.entropy !== undefined) {
-    return `<li><span class="mono">${escapeHtml(item.section)}</span> entropy=${escapeHtml(item.entropy)} ${escapeHtml(item.reason || "")}</li>`;
-  }
-
-  if (item && item.block) {
-    const lines = [];
-    if (item.pattern) {
-      lines.push(`<div>${escapeHtml(item.pattern)}</div>`);
-    }
-    if (item.instruction) {
-      lines.push(`<div>${renderInstructionLine(item.instruction)}</div>`);
-    }
-    if (item.instructions) {
-      lines.push(...item.instructions.map((insn) => `<div>${renderInstructionLine(insn)}</div>`));
-    }
-    if (item.terminator) {
-      lines.push(`<div>terminator=${escapeHtml(item.terminator)}</div>`);
-    }
-    return `<li><span class="mono">${escapeHtml(item.section || "")} ${escapeHtml(item.block)}</span>${lines.length ? `<div class="small mt-1">${lines.join("")}</div>` : ""}</li>`;
-  }
-
-  if (item && typeof item === "object") {
-    const fields = Object.entries(item)
-      .map(([key, value]) => `${escapeHtml(key)}=${escapeHtml(formatValue(value))}`)
-      .join(" | ");
-    return `<li><span class="mono">${fields}</span></li>`;
-  }
-
-  return `<li>${escapeHtml(item)}</li>`;
-}
-
-function renderEvidenceList(evidence) {
-  if (!evidence || !Array.isArray(evidence) || !evidence.length) {
-    return "";
-  }
-
-  return `
-    <details class="mt-2">
-      <summary class="small">Evidence (${evidence.length})</summary>
-      <ul class="small evidence-list mt-2">
-        ${evidence.map((item) => renderEvidenceItem(item)).join("")}
-      </ul>
-    </details>
-  `;
-}
-
-function renderSignals(data) {
-  const pe = data.pe_analysis || {};
-  const xor = data.xor_analysis || {};
-  const signalGrid = document.getElementById("signalGrid");
-  signalGrid.innerHTML = "";
-
-  const cards = [
-    ["Total entropy", pe.total_entropy ?? "n/a"],
-    ["High-entropy sections", (pe.high_entropy_sections || []).length],
-    ["Packer section names", (pe.packer_section_names || []).length],
-    ["Dynamic API imports", (pe.import_obfuscation?.dynamic_resolution_apis || []).length],
-    ["Basic opaque predicates", pe.capstone?.summary?.basic_opaque_predicate_count ?? 0],
-    ["Sink vertices", pe.capstone?.summary?.cfg_sink_vertex_count ?? 0],
-    ["XOR keys", (xor.xor_keys || []).length],
-    ["Memory XOR ops", pe.capstone?.summary?.memory_xor_immediate_count ?? 0],
-    ["Stack XOR strings", (xor.stack_string_xor_hits || []).length],
-    ["API hash rotate ops", pe.capstone?.summary?.rotate_count ?? 0],
-    ["W+X sections", (pe.sections || []).filter((section) => (section.characteristics || []).includes("WRITE") && (section.characteristics || []).includes("EXECUTE")).length],
-  ];
-
-  cards.forEach(([label, value]) => {
-    const col = document.createElement("div");
-    col.className = "col-md-4";
-    col.innerHTML = `
-      <div class="border rounded-4 p-3 h-100">
-        <div class="text-muted small">${label}</div>
-        <div class="fw-semibold">${value}</div>
-      </div>
-    `;
-    signalGrid.appendChild(col);
-  });
-}
-
-function renderLayout(data) {
-  const pe = data.pe_analysis || {};
-  const sectionsTitle = document.getElementById("sectionsTitle");
-  const sectionsHead = document.getElementById("sectionsHead");
-  const sectionsBody = document.getElementById("sectionsBody");
-
-  sectionsBody.innerHTML = "";
-
-  sectionsTitle.textContent = "PE Sections";
-  sectionsHead.innerHTML = `
-    <tr>
-      <th>Name</th>
-      <th>Entropy</th>
-      <th>Raw Size</th>
-      <th>ASCII Ratio</th>
-      <th>Flags</th>
-    </tr>
-  `;
-
-  (pe.sections || []).forEach((section) => {
-    const tr = document.createElement("tr");
-    tr.innerHTML = `
-      <td class="mono">${escapeHtml(section.name)}</td>
-      <td>${escapeHtml(section.entropy)}</td>
-      <td>${humanBytes(section.raw_size)}</td>
-      <td>${escapeHtml(section.printable_ascii_ratio)}</td>
-      <td>${(section.characteristics || []).map((flag) => `<span class="badge bg-secondary me-1">${escapeHtml(flag)}</span>`).join("")}</td>
-    `;
-    sectionsBody.appendChild(tr);
-  });
-}
-
-function renderResult(data) {
-  showCard("summaryCard");
-  showCard("signalsCard");
-  showCard("detailsCard");
-  showCard("sectionsCard");
-  showCard("rawCard");
-
-  const score = data.obfuscation?.score || 0;
-  const pe = data.pe_analysis || {};
-  const xor = data.xor_analysis || {};
-  document.getElementById("scoreRing").style.setProperty("--score", `${score}%`);
-  document.getElementById("scoreText").textContent = score;
-  document.getElementById("statusText").textContent = data.obfuscation?.status || "Unknown";
-  document.getElementById("filenameText").textContent = `${data.original_filename || data.filename} • ${pe.architecture || "unknown architecture"}`;
-  document.getElementById("metaText").textContent = `${humanBytes(data.file_size)} • entry point ${pe.entry_point || "n/a"} • image base ${pe.image_base || "n/a"}`;
-
-  const techniqueBox = document.getElementById("techniques");
-  techniqueBox.innerHTML = "";
-  (data.obfuscation?.possible_techniques || []).forEach((technique) => {
-    const span = document.createElement("span");
-    span.className = "badge badge-soft me-1 mb-1";
-    span.textContent = technique;
-    techniqueBox.appendChild(span);
-  });
-
-  renderSignals(data);
-  renderLayout(data);
-
-  const detailsBody = document.getElementById("detailsBody");
-  detailsBody.innerHTML = "";
-  const details = data.obfuscation?.details || [];
-  if (!details.length) {
-    const tr = document.createElement("tr");
-    tr.innerHTML = `<td colspan="5" class="text-muted">No scored indicators were triggered.</td>`;
-    detailsBody.appendChild(tr);
-  }
-  details.forEach((detail) => {
-    const tr = document.createElement("tr");
-    tr.innerHTML = `
-      <td><span class="badge ${badgeClass(detail.severity)}">${detail.severity || "INFO"}</span></td>
-      <td>${detail.indicator || ""}</td>
-      <td>${detail.technique || ""}</td>
-      <td>${escapeHtml(detail.reason || "")}${renderEvidenceList(detail.evidence)}</td>
-      <td>${detail.points || 0}</td>
-    `;
-    detailsBody.appendChild(tr);
-  });
-
-  showCard("capstoneCard");
-  const cap = pe.capstone || {};
-  const capSummary = cap.summary || {};
-  if (cap.supported === false) {
-    document.getElementById("capstoneSummary").textContent = cap.reason || "Capstone summary unavailable.";
-  } else {
-    const opaqueSamples = (capSummary.evidence?.basic_opaque_predicate_samples || [])
-      .slice(0, 5)
-      .map((item) => `
-        <li>
-          <div class="mono">${escapeHtml(item.address)} • ${escapeHtml(item.section)} • ${escapeHtml(item.pattern)}</div>
-          ${(item.instructions || []).map((insn) => `<div class="small">${renderInstructionLine(insn)}</div>`).join("")}
-        </li>
-      `)
-      .join("");
-    const sinkSamples = (capSummary.evidence?.sink_vertex_samples || [])
-      .slice(0, 5)
-      .map((item) => `
-        <li>
-          <div class="mono">${escapeHtml(item.block)} • ${escapeHtml(item.pattern)}</div>
-          ${(item.instructions || []).map((insn) => `<div class="small">${renderInstructionLine(insn)}</div>`).join("")}
-        </li>
-      `)
-      .join("");
-    const xorSamples = (xor.stack_string_xor_hits || [])
-      .slice(0, 5)
-      .map((item) => `
-        <li>
-          <div class="mono">${escapeHtml(item.section || "")} • ${escapeHtml(item.block)} • ${escapeHtml(item.pattern)}</div>
-          ${(item.instructions || []).map((insn) => `<div class="small">${renderInstructionLine(insn)}</div>`).join("")}
-        </li>
-      `)
-      .join("");
-    const xorScanRegions = (xor.scan_regions || [])
-      .slice(0, 8)
-      .map((region) => `<li><span class="mono">${escapeHtml(region.name || "")}</span> offset ${escapeHtml(region.offset || "")} size ${humanBytes(region.size || 0)}</li>`)
-      .join("");
-    const memoryXorSamples = (capSummary.evidence?.memory_xor_immediate_samples || [])
-      .slice(0, 5)
-      .map((insn) => `<li>${renderInstructionLine(insn)} <span class="text-muted">${escapeHtml(insn.key || "")}</span></li>`)
-      .join("");
-    const apiHashSamples = (capSummary.evidence?.rotate_samples || [])
-      .slice(0, 5)
-      .map((insn) => `<li>${renderInstructionLine(insn)}</li>`)
-      .join("");
-    document.getElementById("capstoneSummary").innerHTML = `
-      <div class="row g-2">
-        <div class="col-md-4"><strong>XOR printable keys:</strong> ${(xor.xor_keys || []).length}</div>
-        <div class="col-md-4"><strong>Dynamic API imports:</strong> ${(pe.import_obfuscation?.dynamic_resolution_apis || []).length}</div>
-        <div class="col-md-4"><strong>Packer section names:</strong> ${(pe.packer_section_names || []).length}</div>
-        <div class="col-md-4"><strong>High-entropy sections:</strong> ${(pe.high_entropy_sections || []).length}</div>
-        <div class="col-md-4"><strong>Basic opaque predicates:</strong> ${capSummary.basic_opaque_predicate_count || 0}</div>
-        <div class="col-md-4"><strong>Sink vertices:</strong> ${capSummary.cfg_sink_vertex_count || 0}</div>
-        <div class="col-md-4"><strong>Memory XOR ops:</strong> ${capSummary.memory_xor_immediate_count || 0}</div>
-        <div class="col-md-4"><strong>Stack XOR strings:</strong> ${(xor.stack_string_xor_hits || []).length}</div>
-        <div class="col-md-4"><strong>API hash rotate ops:</strong> ${capSummary.rotate_count || 0}</div>
-        <div class="col-md-4"><strong>PEB/TEB access:</strong> ${capSummary.segment_peb_access_count || 0}</div>
-      </div>
-      ${xorScanRegions ? `<hr><div class="small text-muted mb-2">XOR scan regions</div><ul class="mb-0">${xorScanRegions}</ul>` : ""}
-      ${opaqueSamples ? `<hr><div class="small text-muted mb-2">Dead code / opaque predicate samples</div><ul class="mb-0">${opaqueSamples}</ul>` : ""}
-      ${sinkSamples ? `<hr><div class="small text-muted mb-2">Sink / dead-end block samples</div><ul class="mb-0">${sinkSamples}</ul>` : ""}
-      ${memoryXorSamples ? `<hr><div class="small text-muted mb-2">Memory XOR immediate samples</div><ul class="mb-0">${memoryXorSamples}</ul>` : ""}
-      ${xorSamples ? `<hr><div class="small text-muted mb-2">Stack XOR string samples</div><ul class="mb-0">${xorSamples}</ul>` : ""}
-      ${apiHashSamples ? `<hr><div class="small text-muted mb-2">API hashing arithmetic samples</div><ul class="mb-0">${apiHashSamples}</ul>` : ""}
-    `;
-  }
-
-  document.getElementById("rawJson").textContent = JSON.stringify(data, null, 2);
-
-  if (data.report_id) {
-    showCard("downloadCard");
-    document.getElementById("jsonLink").href = `/api/report/${data.report_id}.json`;
-    document.getElementById("csvLink").href = `/api/report/${data.report_id}.csv`;
-  }
-}
-
-form.addEventListener("submit", async (event) => {
-  event.preventDefault();
-
-  if (!fileInput.files.length) {
-    statusBox.textContent = "Choose a file first.";
-    return;
-  }
-
-  const body = new FormData();
-  body.append("file", fileInput.files[0]);
-
-  analyzeBtn.disabled = true;
-  statusBox.textContent = "Analyzing Windows PE obfuscation heuristics...";
-
-  try {
-    const response = await fetch("/api/analyze", { method: "POST", body });
-    const data = await response.json();
-
-    if (!response.ok) {
-      throw new Error(data.error || "Analysis failed.");
-    }
-
-    statusBox.textContent = "Analysis complete.";
-    renderResult(data);
-  } catch (error) {
-    statusBox.textContent = error.message;
-  } finally {
-    analyzeBtn.disabled = false;
-  }
-});
-
-["dragenter", "dragover"].forEach((eventName) => {
-  dropzone.addEventListener(eventName, (event) => {
-    event.preventDefault();
-    dropzone.classList.add("dragover");
-  });
-});
-
-["dragleave", "drop"].forEach((eventName) => {
-  dropzone.addEventListener(eventName, (event) => {
-    event.preventDefault();
-    dropzone.classList.remove("dragover");
-  });
-});
-
-dropzone.addEventListener("drop", (event) => {
-  if (event.dataTransfer.files.length) {
-    fileInput.files = event.dataTransfer.files;
-  }
-});
-</script>
-</body>
+		<script src="/static/js/app.js"></script>
+	</body>
 </html>
